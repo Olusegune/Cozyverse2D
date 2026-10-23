@@ -45,21 +45,27 @@ def outbound_png(data: bytes) -> bytes:
 
 
 class Providers:
-    def __init__(self, db: Database, secrets: SecretStore, registry: dict[str, ImageProvider]):
+    def __init__(self, db: Database, secrets: SecretStore, registry: dict[str, ImageProvider],
+                 extra: Optional[dict[str, Any]] = None):
         self.db, self.secrets, self.registry = db, secrets, registry
+        self.extra = extra if extra is not None else {}      # e.g. mesh providers; they share the key vault
 
-    def provider(self, pid: str) -> ImageProvider:
-        if pid not in self.registry:
-            raise LookupError("provider")
-        return self.registry[pid]
+    def provider(self, pid: str) -> Any:
+        if pid in self.registry:
+            return self.registry[pid]
+        if pid in self.extra:
+            return self.extra[pid]
+        raise LookupError("provider")
+
+    def configured_any(self, p: Any) -> bool:
+        return (not p.needs_key) or bool(self.secrets.get(self.key_name(p.id)))
 
     @staticmethod
     def key_name(pid: str) -> str:
         return f"provider:{pid}"
 
     def configured(self, pid: str) -> bool:
-        p = self.provider(pid)
-        return (not p.needs_key) or bool(self.secrets.get(self.key_name(pid)))
+        return self.configured_any(self.provider(pid))
 
     def set_key(self, pid: str, key: str) -> None:
         p = self.provider(pid)

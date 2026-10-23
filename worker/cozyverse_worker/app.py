@@ -8,10 +8,11 @@ from typing import Dict, Literal, Optional
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from . import __version__
 from .config import MAX_BODY_BYTES, MAX_RESOLUTION, MIN_RESOLUTION, Settings
+from .artifacts import RepairError
 from .creation import Blocked, CreationError, NeedsApproval
 from .secret_store import SecretError, SecretStore
 from .styles import StyleError
@@ -82,6 +83,7 @@ class RenderBody(Strict):
     samples: int = Field(default=64, ge=1, le=1024)
     base_policies: Optional[Dict[ViewName, Policy]] = None
     views: Optional[list[ViewName]] = Field(default=None, max_length=5)
+    extras: list[Literal["top"]] = Field(default_factory=list, max_length=1)
     perspective_quadrant: Literal["front_left", "front_right", "rear_left", "rear_right"] = "front_left"
     perspective_elevation_degrees: float = Field(default=30.0, ge=0.0, lt=90.0)
     perspective_focal_mm: float = Field(default=50.0, ge=10.0, le=300.0)
@@ -145,6 +147,68 @@ class InstanceBody(Strict):
 class OrientationBody(Strict):
     yaw_deg: Literal[0, 90, 180, 270] = 0
     target_height: Optional[float] = Field(default=None, ge=0.05, le=100.0)
+
+
+class ExportBody(Strict):
+    include_contact_sheet: bool = False
+    override_critical: bool = False
+    override_reason: str = Field(default="", max_length=500)
+
+
+class ArtifactSettingsBody(Strict):
+    neutralize_cast: Optional[StrictBool] = None
+    preserve_warm_lights: Optional[StrictBool] = None
+    reduce_noise: Optional[StrictBool] = None
+    avoid_waxy_skin: Optional[StrictBool] = None
+    preserve_texture: Optional[StrictBool] = None
+    check_shape: Optional[StrictBool] = None
+    check_text: Optional[StrictBool] = None
+    check_background: Optional[StrictBool] = None
+    check_consistency: Optional[StrictBool] = None
+    show_diff: Optional[StrictBool] = None
+    mode: Optional[Literal["studio", "scene_grade"]] = None
+
+
+class RepairPreviewBody(Strict):
+    kind: Literal["cast", "noise"]
+    strength: float = Field(default=1.0, ge=0.05, le=1.0)
+
+
+class RepairAcceptBody(Strict):
+    note: str = Field(default="", max_length=500)
+
+
+class DetectEstimateBody(Strict):
+    provider: str = Field(max_length=40)
+    model: Optional[str] = Field(default=None, max_length=80)
+    tiles: int = Field(default=0, ge=0, le=3)
+
+
+class ApproveBody(Strict):
+    estimate_id: str = Field(max_length=64)
+    approved: bool = False
+
+
+class MeshOptions(Strict):
+    target_polycount: Optional[int] = Field(default=None, ge=100, le=300000)
+    texture: bool = True
+    pbr: bool = False
+    pose_mode: Optional[Literal["a-pose", "t-pose"]] = None
+
+
+class MeshEstimateBody(Strict):
+    provider_id: str = Field(max_length=40)
+    model_id: str = Field(max_length=80)
+    options: MeshOptions = Field(default_factory=MeshOptions)
+
+
+class ConfirmBody(Strict):
+    ids: Optional[list[str]] = Field(default=None, max_length=500)
+    min_confidence: float = Field(default=0.0, ge=0, le=1)
+
+
+class FixtureBody(Strict):
+    fixture: Literal["bar", "master_base", "calibration_cube", "chart"]
 
 
 class KeyBody(Strict):
@@ -250,8 +314,9 @@ class BodyLimit:
         await self.app(scope, limited, send)
 
 
-def create_app(settings: Settings, secret_store: Optional[SecretStore] = None, registry: Optional[dict] = None) -> FastAPI:
-    svc = Service(settings, secret_store, registry)
+def create_app(settings: Settings, secret_store: Optional[SecretStore] = None, registry: Optional[dict] = None,
+               mesh_registry: Optional[dict] = None, vision_registry: Optional[dict] = None) -> FastAPI:
+    svc = Service(settings, secret_store, registry, mesh_registry, vision_registry)
 
     def auth(request: Request) -> None:
         header = request.headers.get("authorization", "")
@@ -283,6 +348,7 @@ def create_app(settings: Settings, secret_store: Optional[SecretStore] = None, r
     for exc in (InvalidItem, ImageRejected, MeshRejected):
         app.add_exception_handler(exc, _msg(400))
     app.add_exception_handler(Blocked, _msg(409))
+    app.add_exception_handler(RepairError, _msg(409))
     app.add_exception_handler(NeedsApproval, _msg(428))
     app.add_exception_handler(CreationError, _msg(400))
     app.add_exception_handler(StyleError, _msg(400))
@@ -408,6 +474,37 @@ def create_app(settings: Settings, secret_store: Optional[SecretStore] = None, r
         op = body.model_dump(exclude_none=True)
         return svc.creator.edit_local(project_id, _id(source_id), op)
 
+    # ---------------- detection and mesh providers ----------------
+    @app.get("/ai/providers")
+    def ai_providers():
+        return {"vision": svc.detector.providers(), "mesh": svc.meshgen.providers()}
+
+    @app.post("/projects/{project_id}/detect/estimate")
+    def detect_estimate(project_id: str, body: DetectEstimateBody):
+        return svc.detector.estimate(_id(project_id), body.model_dump())
+
+    @app.post("/projects/{project_id}/detect", status_code=202)
+    def detect(project_id: str, body: ApproveBody):
+        return {"job_id": svc.detector.run(_id(project_id), _id(body.estimate_id), body.approved)}
+
+    @app.post("/projects/{project_id}/inventory/confirm")
+    def confirm_items(project_id: str, body: ConfirmBody):
+        return {"confirmed": svc.confirm_inventory(_id(project_id), body.ids, body.min_confidence)}
+
+    @app.get("/projects/{project_id}/inventory/audit")
+    def audit(project_id: str):
+        return svc.inventory_audit(_id(project_id))
+
+    @app.post("/assets/{asset_id}/mesh-generate/estimate")
+    def mesh_estimate(asset_id: str, body: MeshEstimateBody):
+        d = body.model_dump()
+        d["options"] = {k: v for k, v in d["options"].items() if v is not None}
+        return svc.meshgen.estimate(_id(asset_id), d)
+
+    @app.post("/assets/{asset_id}/mesh-generate", status_code=202)
+    def mesh_generate(asset_id: str, body: ApproveBody):
+        return {"job_id": svc.meshgen.run(_id(asset_id), _id(body.estimate_id), body.approved)}
+
     # ---------------- projects ----------------
     @app.post("/projects", status_code=201)
     def create_project(body: ProjectCreate):
@@ -428,6 +525,14 @@ def create_app(settings: Settings, secret_store: Optional[SecretStore] = None, r
     @app.get("/projects/{project_id}/assets")
     def list_assets(project_id: str):
         return svc.list_assets(_id(project_id))
+
+    @app.post("/projects/{project_id}/fixtures", status_code=201)
+    def add_fixture(project_id: str, body: FixtureBody):
+        return svc.asset_view(svc.add_asset(_id(project_id), body.fixture))
+
+    @app.get("/projects/{project_id}/exports")
+    def list_exports(project_id: str):
+        return svc.list_exports(_id(project_id))
 
     # ---------------- sources ----------------
     @app.post("/projects/{project_id}/sources", status_code=201)
@@ -536,6 +641,64 @@ def create_app(settings: Settings, secret_store: Optional[SecretStore] = None, r
         return FileResponse(svc.view_file(_id(asset_id), view), media_type="image/png",
                             headers={"Cache-Control": "no-store", "Content-Disposition": "inline"})
 
+    # ---------------- artifact QA and repairs ----------------
+    def _settings(body: Optional[ArtifactSettingsBody]) -> Optional[dict]:
+        return body.model_dump(exclude_none=True) if body else None
+
+    @app.post("/assets/{asset_id}/artifacts/analyze")
+    def analyze_asset(asset_id: str, body: Optional[ArtifactSettingsBody] = None):
+        svc.get_asset(_id(asset_id))
+        return svc.artifacts.analyze_asset(asset_id, _settings(body))
+
+    @app.post("/assets/{asset_id}/views/{view}/artifacts/analyze")
+    def analyze_view(asset_id: str, view: ViewName, body: Optional[ArtifactSettingsBody] = None):
+        svc.get_asset(_id(asset_id))
+        return svc.artifacts.analyze_view(asset_id, view, _settings(body))
+
+    @app.get("/assets/{asset_id}/views/{view}/artifacts")
+    def view_artifacts(asset_id: str, view: ViewName):
+        svc.get_asset(_id(asset_id))
+        rep = svc.artifacts.latest(asset_id, view)
+        if rep is None:
+            raise NotFound("artifact report")
+        return rep
+
+    @app.get("/assets/{asset_id}/views/{view}/artifacts/mask/{name}")
+    def artifact_mask(asset_id: str, view: ViewName, name: Literal["protected", "neutral", "flat"]):
+        a = svc.get_asset(_id(asset_id))
+        p = svc.asset_dir(a) / "qa" / "artifacts" / view / f"{name}.png"
+        if not p.is_file():
+            raise NotFound("mask")
+        return FileResponse(p, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+    @app.post("/assets/{asset_id}/views/{view}/repairs/preview", status_code=201)
+    def repair_preview(asset_id: str, view: ViewName, body: RepairPreviewBody):
+        svc.get_asset(_id(asset_id))
+        return svc.artifacts.preview(asset_id, view, body.kind, body.strength)
+
+    @app.get("/assets/{asset_id}/repairs")
+    def repairs(asset_id: str, view: Optional[ViewName] = None):
+        svc.get_asset(_id(asset_id))
+        return svc.artifacts.repairs(asset_id, view)
+
+    @app.get("/assets/{asset_id}/repairs/{repair_id}/image")
+    def repair_image(asset_id: str, repair_id: str, which: Literal["before", "after", "diff", "mask"] = "after"):
+        return FileResponse(svc.artifacts.repair_file(_id(asset_id), _id(repair_id), which), media_type="image/png",
+                            headers={"Cache-Control": "no-store"})
+
+    @app.post("/assets/{asset_id}/repairs/{repair_id}/accept")
+    def repair_accept(asset_id: str, repair_id: str, body: RepairAcceptBody):
+        return svc.artifacts.accept(_id(asset_id), _id(repair_id), body.note)
+
+    @app.post("/assets/{asset_id}/repairs/{repair_id}/reject", status_code=204)
+    def repair_reject(asset_id: str, repair_id: str):
+        svc.artifacts.reject(_id(asset_id), _id(repair_id))
+
+    @app.post("/assets/{asset_id}/views/{view}/repairs/revert")
+    def repair_revert(asset_id: str, view: ViewName):
+        svc.get_asset(_id(asset_id))
+        return svc.artifacts.revert(asset_id, view)
+
     # ---------------- jobs / export ----------------
     @app.get("/jobs/{job_id}")
     def job(job_id: str):
@@ -546,7 +709,7 @@ def create_app(settings: Settings, secret_store: Optional[SecretStore] = None, r
         return svc.cancel_job(_id(job_id))
 
     @app.post("/projects/{project_id}/export", status_code=202)
-    def export(project_id: str):
-        return {"job_id": svc.export_project(_id(project_id))}
+    def export(project_id: str, body: Optional[ExportBody] = None):
+        return {"job_id": svc.export_project(_id(project_id), (body or ExportBody()).model_dump())}
 
     return app

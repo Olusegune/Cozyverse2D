@@ -85,6 +85,13 @@ MIGRATIONS = {
       request_json TEXT NOT NULL, estimate_json TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL,
       used INTEGER NOT NULL DEFAULT 0);
     """,
+    5: """
+    CREATE TABLE artifact_reports (asset_id TEXT NOT NULL, view TEXT NOT NULL, report_json TEXT NOT NULL,
+      sha256 TEXT NOT NULL, at REAL NOT NULL, PRIMARY KEY (asset_id, view));
+    CREATE TABLE view_repairs (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, view TEXT NOT NULL, kind TEXT NOT NULL,
+      params_json TEXT NOT NULL, metrics_json TEXT NOT NULL, original_sha TEXT NOT NULL, result_sha TEXT NOT NULL,
+      rel_dir TEXT NOT NULL, created_at REAL NOT NULL, accepted_at REAL, note TEXT NOT NULL DEFAULT '');
+    """,
 }
 
 

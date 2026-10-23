@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import shutil
 import sys
@@ -16,8 +17,12 @@ import jsonschema
 
 from . import blender_adapter, qa
 from .mesh_import import validate_glb
+from .mesh_providers import build_mesh_registry
+from .vision import build_vision_registry
 from .config import BLENDER_DIR, SCHEMA_DIR, Settings
 from .db import Database, dumps, now
+from .ai_pipeline import Detector, MeshGen
+from .artifacts import Artifacts, RepairError
 from .creation import Creator, Providers
 from .inventory import Inventory
 from .security import ASSET_CODE_RE, PathEscape, safe_join, slugify
@@ -58,7 +63,8 @@ class Conflict(RuntimeError):
 
 
 class Service:
-    def __init__(self, settings: Settings, secret_store: Optional[SecretStore] = None, registry: Optional[dict] = None):
+    def __init__(self, settings: Settings, secret_store: Optional[SecretStore] = None, registry: Optional[dict] = None,
+                 mesh_registry: Optional[dict] = None, vision_registry: Optional[dict] = None):
         self.settings = settings
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         settings.projects_dir.mkdir(parents=True, exist_ok=True)
@@ -69,9 +75,16 @@ class Service:
         self.sources = SourceStore(self.db, self.project_dir)
         self.inv = Inventory(self.db, self.project_dir)
         self.secrets = secret_store if secret_store is not None else default_store()
-        self.providers = Providers(self.db, self.secrets, registry if registry is not None else build_registry())
+        mesh_reg = mesh_registry if mesh_registry is not None else build_mesh_registry()
+        self.providers = Providers(self.db, self.secrets, registry if registry is not None else build_registry(), mesh_reg)
         self.styles = StyleStore(self.db)
+        self.artifacts = Artifacts(self.db, self.get_asset, self.asset_dir,
+                                   lambda aid: self._write_asset_manifest(aid, {}, self.default_policies(self.get_asset(aid))))
         self.creator = Creator(self.db, self.providers, self.styles, self.sources, self.submit_generic, self.get_project)
+        self.detector = Detector(self.db, self.providers, vision_registry if vision_registry is not None else build_vision_registry(),
+                                 self.sources, self.get_project, self.create_inventory, self.list_assets, self.submit_generic)
+        self.meshgen = MeshGen(self.db, self.providers, mesh_reg, self.get_asset, self.inv.crop_path, self.import_mesh,
+                               self.submit_generic, self.set_mesh_provenance)
         self.db.execute("UPDATE jobs SET state='FAILED', message='Interrupted by restart; run again', "
                         "updated_at=? WHERE state IN ('RUNNING','QUEUED','NEW')", (now(),))
 
@@ -245,6 +258,9 @@ class Service:
 
         self._pool.submit(run)
 
+    def artifact_blocking(self, aid: str) -> list[str]:
+        return self.artifacts.blocking(aid)
+
     def submit_generic(self, kind: str, subject: str, fn) -> str:
         """Queue any worker function as a job (one at a time, cancellable, failures surface on the job)."""
         jid = self._new_job(kind, subject)
@@ -374,6 +390,56 @@ class Service:
         self.get_project(pid)
         a = self.inv.merge(pid, ids, into)
         return self.asset_view(a)
+
+    def set_mesh_provenance(self, aid: str, prov: dict) -> None:
+        a = self.get_asset(aid)
+        params = json.loads(a["params_json"])
+        if "_mesh" in params:
+            params["_mesh"]["provenance"] = prov
+            self.db.execute("UPDATE assets SET params_json=? WHERE id=?", (dumps(params), aid))
+
+    def confirm_inventory(self, pid: str, ids: Optional[list[str]], min_confidence: float = 0.0) -> int:
+        self.get_project(pid)
+        rows = self.db.all("SELECT id, confidence FROM assets WHERE project_id=? AND status='unconfirmed'", (pid,))
+        n = 0
+        for r in rows:
+            if (ids is None or r["id"] in ids) and r["confidence"] >= min_confidence:
+                self.inv.update(r["id"], {"status": "confirmed"})
+                n += 1
+        return n
+
+    def inventory_audit(self, pid: str) -> dict:
+        """Small-prop omission audit: tiny items, unconfirmed proposals and image zones with nothing in them."""
+        items = [i for i in self.list_assets(pid) if i["bbox"]]
+        tiny = [{"id": i["id"], "code": i["code"], "name": i["name"], "area": round(i["bbox"][2] * i["bbox"][3], 6)}
+                for i in items if i["bbox"][2] * i["bbox"][3] < 0.001]
+        grid, empty = 4, []
+        for gy in range(grid):
+            for gx in range(grid):
+                cell = [gx / grid, gy / grid, 1 / grid, 1 / grid]
+                if not any(self._overlap(cell, i["bbox"]) > 0 for i in items):
+                    empty.append({"zone": [round(v, 3) for v in cell]})
+        return {"item_count": len(items), "tiny_items": tiny,
+                "unconfirmed": [{"id": i["id"], "code": i["code"], "confidence": i["confidence"]} for i in items if i["status"] == "unconfirmed"],
+                "low_confidence": [i["code"] for i in items if i["confidence"] < 0.6],
+                "empty_zones": empty,
+                "hint": "Empty zones may hide small props. Run a second pass with tiles or add items by hand."}
+
+    @staticmethod
+    def _overlap(a: list[float], b: list[float]) -> float:
+        iw = max(0.0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+        ih = max(0.0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
+        return iw * ih
+
+    def list_exports(self, pid: str) -> list[dict]:
+        self.get_project(pid)
+        out = []
+        for r in self.db.all("SELECT * FROM export_runs WHERE project_id=? ORDER BY created_at DESC LIMIT 50", (pid,)):
+            rep = json.loads(r["report_json"]) if r["report_json"] else {}
+            out.append({"id": r["id"], "status": r["status"], "path": r["path"], "created_at": r["created_at"],
+                        "folder": str(Path(r["path"]).parent) if r["path"] else None,
+                        "incomplete": rep.get("incomplete", {}), "override": rep.get("override")})
+        return out
 
     def inventory_tree(self, pid: str) -> list[dict]:
         items = {x["id"]: {**x, "children": []} for x in self.list_assets(pid)}
@@ -515,6 +581,17 @@ class Service:
                                 "WHERE asset_id=? AND view=?",
                                 (dumps({"findings": [{"code": "RENDER_ERROR", "severity": "critical",
                                                       "detail": str(e)[:300]}]}), now(), aid, v))
+        if (a["fixture"] == "master_base" or "top" in (opts.get("extras") or [])) and not failed:
+            try:                                  # extras never replace or count as one of the five required views
+                (d / "extras").mkdir(exist_ok=True)
+                blender_adapter.render_view(
+                    blender, render_spec_path, d / "extras" / "top.png", d / "qa" / "top_meta.json", view="top",
+                    policy=policies.get("front", "none"), engine=opts["engine"], res=res, samples=opts["samples"],
+                    bg=opts["background"], cancel=ev)
+            except blender_adapter.Cancelled:
+                raise
+            except Exception:  # noqa: BLE001
+                (d / "extras" / "top.png").unlink(missing_ok=True)
         self._write_asset_manifest(aid, opts, policies)
         if failed:
             return {"_state": "FAILED", "message": f"{done}/{len(only)} views rendered; failed: {', '.join(failed)}",
@@ -554,6 +631,11 @@ class Service:
         schema = json.loads((SCHEMA_DIR / name).read_text(encoding="utf8"))
         return jsonschema.Draft202012Validator(schema)
 
+    THREE_D_GOALS = ("3D_PROXY", "3D_RECONSTRUCTION", "SCENE_REASSEMBLY")
+
+    def needs_3d(self, a: dict) -> bool:
+        return a["fixture"] != "custom" or a["goal"] in ("3D_PROXY", "3D_RECONSTRUCTION")
+
     def _asset_manifest(self, a: dict, policies: dict) -> dict:
         view_rows = {r["view"]: r for r in self.db.all("SELECT * FROM view_renders WHERE asset_id=?", (a["id"],))}
         views = {}
@@ -583,15 +665,35 @@ class Service:
         issues = sorted({f["code"] for r in view_rows.values() if r["qa_json"]
                          for f in json.loads(r["qa_json"]).get("findings", [])})
         mesh = {"path": "mesh/canonical.glb" if a["mesh_status"] in APPROVED_MESH else None,
-                "status": a["mesh_status"], "revision": a["model_revision"]}
-        return {
-            "asset_id": a["code"], "name": a["name"], "category": a["category"], "parent_id": None,
-            "count": 1, "source_visibility": "unseen_inferred", "confidence": 1.0,
-            "visible_features": [], "inferred_features": ["procedural proxy geometry"],
+                "status": a["mesh_status"], "revision": a["model_revision"], "source": a["mesh_source"]}
+        iv = self.inv.view(a)
+        parent = self.db.one("SELECT code FROM assets WHERE id=?", (a["parent_id"],)) if a["parent_id"] else None
+        custom = a["fixture"] == "custom"
+        if a["goal"] == "REFERENCE_ONLY" and custom:
+            output_class = "UNVERIFIED_2D"
+        elif a["goal"] == "2D_LAYER_EXPORT" and custom:
+            output_class = "2D_LAYER"
+        else:
+            output_class = "3D"
+        man = {
+            "asset_id": a["code"], "name": a["name"], "category": a["category"],
+            "parent_id": parent["code"] if parent else None,
+            "count": a["count"], "source_visibility": a["visibility"] if custom else "unseen_inferred",
+            "confidence": a["confidence"], "scene_zone": a["scene_zone"],
+            "visible_features": [], "inferred_features": ["imported mesh"] if a["mesh_source"] == "imported" else
+            (["procedural proxy geometry"] if self.needs_3d(a) else []),
             "mesh": mesh, "views": views, "qa": {"status": qa_status, "issues": issues},
             "model_revision": a["model_revision"] or "none",
             "default_base_policy": policies.get("front", "none"),
+            "goal": a["goal"], "kind": a["kind"], "status": a["status"], "output_class": output_class,
+            "source_revision_id": a["source_revision_id"], "notes": a["notes"],
+            "instances": self.inv.instances(a["id"]),
         }
+        if iv["bbox"]:
+            man["bbox_normalized_xywh"] = iv["bbox"]
+        if iv["polygon"]:
+            man["polygon_normalized"] = iv["polygon"]
+        return man
 
     def _write_asset_manifest(self, aid: str, opts: dict, policies: dict) -> dict:
         a = self.get_asset(aid)
@@ -603,67 +705,153 @@ class Service:
         return manifest
 
     # ---------- export ----------
-    def export_project(self, pid: str) -> str:
+    def export_project(self, pid: str, opts: Optional[dict] = None) -> str:
         self.get_project(pid)
+        opts = opts or {}
+        reason = (opts.get("override_reason") or "").strip()
+        if opts.get("override_critical") and len(reason) < 10:
+            raise Conflict("Overriding critical QA findings needs a written reason (at least 10 characters).")
         jid = self._new_job("export", pid)
-        self._submit(jid, lambda ev: self._do_export(pid, ev))
+        self._submit(jid, lambda ev: self._do_export(pid, ev, opts))
         return jid
 
-    def _do_export(self, pid: str, ev: threading.Event) -> dict:
+    def _contact_sheet(self, files: dict[str, Path]) -> bytes:
+        """Supplementary overview only. Never counted as, or substituted for, the five individual files."""
+        from PIL import Image, ImageDraw
+        tiles = [(n, Image.open(p).convert("RGB").resize((320, 320))) for n, p in files.items()]
+        sheet = Image.new("RGB", (320 * len(tiles), 350), "white")
+        dr = ImageDraw.Draw(sheet)
+        for i, (n, im) in enumerate(tiles):
+            sheet.paste(im, (i * 320, 30))
+            dr.text((i * 320 + 8, 8), n.upper() + "  (supplementary contact sheet)", fill="black")
+        b = io.BytesIO()
+        sheet.save(b, "PNG")
+        return b.getvalue()
+
+    def _do_export(self, pid: str, ev: threading.Event, opts: Optional[dict] = None) -> dict:
+        opts = opts or {}
         proj = self.get_project(pid)
         pdir = self.project_dir(pid)
         out_dir = pdir / "exports"
         out_dir.mkdir(exist_ok=True)
-        assets = [self.get_asset(a["id"]) for a in self.db.all("SELECT id FROM assets WHERE project_id=?", (pid,))]
+        assets = [self.get_asset(a["id"]) for a in self.db.all("SELECT id FROM assets WHERE project_id=? ORDER BY code", (pid,))]
         entries: dict[str, bytes] = {}
-        report: dict[str, Any] = {"assets": {}, "problems": []}
-        complete, any_incomplete = [], False
+        report: dict[str, Any] = {"assets": {}, "incomplete": {}, "override": None}
+        any_incomplete = False
+        override = bool(opts.get("override_critical"))
+        if override:
+            report["override"] = {"reason": (opts.get("override_reason") or "").strip(), "at": now()}
+        layers: list[dict] = []
         for a in assets:
             pol = self.default_policies(a)
             manifest = self._write_asset_manifest(a["id"], {}, pol)
             d = self.asset_dir(a)
             prefix = f"assets/{a['code']}/"
             entries[prefix + "asset.json"] = json.dumps(manifest, indent=2).encode()
-            a_ok = manifest["qa"]["status"] == "PASSED" and a["mesh_status"] in APPROVED_MESH
-            for v in VIEWS:
-                ve = manifest["views"][v]
-                if ve["path"] and not ve["stale"]:
-                    f = safe_join(d, *ve["path"].split("/"))
-                    if f.is_file() and qa.sha256_file(f) == ve["sha256"]:
-                        entries[prefix + ve["path"]] = f.read_bytes()
-                        entries[prefix + f"qa/{v}_camera.json"] = json.dumps(self._view_job_json(a, v, ve), indent=2).encode()
-                        continue
-                a_ok = False
-            for rel in ("mesh/canonical.glb", "mesh/spec.json"):
-                f = d / rel
-                if f.is_file():
-                    entries[prefix + rel] = f.read_bytes()
+            reasons: list[str] = []
+            crop = d / "source" / "crop.png"
+            mask = d / "source" / "mask.png"
+            if crop.is_file():
+                entries[prefix + "source/crop.png"] = crop.read_bytes()
+            if mask.is_file():
+                entries[prefix + "source/mask.png"] = mask.read_bytes()
+            if self.needs_3d(a):
+                if manifest["qa"]["status"] != "PASSED":
+                    reasons.append(f"five-view set is {manifest['qa']['status']}")
+                if a["mesh_status"] not in APPROVED_MESH:
+                    reasons.append("no approved 3D model")
+                for v in VIEWS:
+                    ve = manifest["views"][v]
+                    ok = False
+                    if ve["path"] and not ve["stale"]:
+                        f = safe_join(d, *ve["path"].split("/"))
+                        if f.is_file() and qa.sha256_file(f) == ve["sha256"]:
+                            entries[prefix + ve["path"]] = f.read_bytes()
+                            entries[prefix + f"qa/{v}_camera.json"] = json.dumps(self._view_job_json(a, v, ve), indent=2).encode()
+                            ok = True
+                    if not ok:
+                        reasons.append(f"{v} view missing or stale")
+                for rel in ("mesh/canonical.glb", "mesh/spec.json"):
+                    f = d / rel
+                    if f.is_file():
+                        entries[prefix + rel] = f.read_bytes()
+                for ex in (d / "extras").glob("*.png") if (d / "extras").is_dir() else []:
+                    entries[prefix + "extras/" + ex.name] = ex.read_bytes()
+                blocking = self.artifact_blocking(a["id"]) if hasattr(self, "artifact_blocking") else []
+                if blocking and not override:
+                    reasons.append("unresolved critical artifact findings: " + ", ".join(blocking))
+                if opts.get("include_contact_sheet") and all(manifest["views"][v]["path"] for v in VIEWS):
+                    entries[prefix + "extras/contact_sheet.png"] = self._contact_sheet(
+                        {v: safe_join(d, *manifest["views"][v]["path"].split("/")) for v in VIEWS})
+            else:
+                if not crop.is_file():
+                    reasons.append("no source crop")
+                else:
+                    folder = "layers" if manifest["output_class"] == "2D_LAYER" else "reference"
+                    entries[f"{folder}/{a['code']}.png"] = crop.read_bytes()
+                    layers.append({"asset_id": a["code"], "path": f"{folder}/{a['code']}.png",
+                                   "unverified_2d": manifest["output_class"] == "UNVERIFIED_2D",
+                                   "bbox": manifest.get("bbox_normalized_xywh"), "source_revision_id": a["source_revision_id"]})
             entries[prefix + "qa/report.json"] = json.dumps(
-                {"asset": a["code"], "qa": manifest["qa"], "views": {v: manifest["views"][v]["status"] for v in VIEWS}},
+                {"asset": a["code"], "output_class": manifest["output_class"], "qa": manifest["qa"],
+                 "views": {v: manifest["views"][v]["status"] for v in VIEWS}, "incomplete_reasons": reasons},
                 indent=2).encode()
-            report["assets"][a["code"]] = "COMPLETE" if a_ok else "INCOMPLETE"
-            (complete if a_ok else []).append(a["code"])
-            any_incomplete |= not a_ok
+            report["assets"][a["code"]] = "COMPLETE" if not reasons else "INCOMPLETE"
+            if reasons:
+                report["incomplete"][a["code"]] = reasons
+            any_incomplete |= bool(reasons)
             if a["fixture"] == "master_base":
-                base = proxy_spec.master_base_spec()["base"]
-                bm = {"base_id": "BASE-001", "mode": base["mode"], "width_m": base["width_m"],
-                      "depth_m": base["depth_m"], "thickness_m": base["thickness_m"],
-                      "materials": {"substrate": "dark_stone", "surface": "wet_asphalt_and_pavers"},
-                      "layers": ["TERRAIN", "ROAD-001", "SIDEWALK-001"],
+                params = json.loads(a["params_json"] or "{}")
+                base = proxy_spec.master_base_spec(**{k: v for k, v in params.items() if k in proxy_spec.BASE_PARAMS})["base"]
+                bm = {"base_id": "BASE-001", "mode": base["mode"], "width_m": base["width_m"], "depth_m": base["depth_m"],
+                      "thickness_m": base["thickness_m"], "bevel_m": base["bevel_m"], "border_width_m": base["border_width_m"],
+                      "materials": {"substrate": base["material"], "surface": "wet_asphalt_and_pavers"},
+                      "layers": ["TRIM", "TERRAIN", "ROAD-001", "SIDEWALK-001"],
                       "source_inferred_regions": ["underside"]}
                 self._validator("master_base.schema.json").validate(bm)
                 entries["base/master_base_manifest.json"] = json.dumps(bm, indent=2).encode()
+                glb = d / "mesh" / "canonical.glb"
+                if glb.is_file():
+                    entries["base/master_base.glb"] = glb.read_bytes()
+                top = d / "extras" / "top.png"
+                if top.is_file():
+                    entries["base/top.png"] = top.read_bytes()
+
+        # ---- source, provenance, inventory
+        src_path, src_info = None, None
+        if proj["approved_source_id"]:
+            src_info = self.sources.get(proj["approved_source_id"])
+            p = self.sources.path(proj["approved_source_id"])
+            src_path = f"source/original{p.suffix}"
+            entries[src_path] = p.read_bytes()
+            entries["source/lineage.json"] = json.dumps(self.sources.lineage(proj["approved_source_id"]), indent=2).encode()
+        style = (src_info or {}).get("meta", {}).get("style")
+        style_dna = {"scene_mode": proj["scene_mode"], "style": (style or {}).get("label") if style else None}
+        if layers:
+            entries["layers/manifest.json"] = json.dumps({"layers": layers}, indent=2).encode()
+        tree = self.inventory_tree(pid)
+        entries["inventory/inventory.json"] = json.dumps(tree, indent=2, default=str).encode()
+        entries["inventory/history.json"] = json.dumps(self.inv.history(pid), indent=2).encode()
+        complete_all = bool(assets) and not any_incomplete
         scene = {"scene_id": "CV-" + proj["slug"].upper()[:24], "name": proj["name"],
-                 "source": {"path": "source/original.jpg"}, "style_dna": {},
+                 "source": {"path": src_path, **({"sha256": src_info["sha256"], "width": src_info["width"],
+                                                  "height": src_info["height"]} if src_info else {})},
+                 "style_dna": style_dna, "units_assumption": "arbitrary until manually calibrated",
                  "assets": [a["code"] for a in assets],
-                 "export_completeness": "COMPLETE" if assets and not any_incomplete else "PARTIAL"}
+                 "scene_relationships": [{"parent": x["parent_id"], "child": x["id"]} for x in self.list_assets(pid) if x["parent_id"]],
+                 "export_completeness": "COMPLETE" if complete_all else "PARTIAL"}
         self._validator("scene.schema.json").validate(scene)
         entries["inventory/scene_manifest.json"] = json.dumps(scene, indent=2).encode()
-        entries["project.json"] = json.dumps({"id": proj["id"], "name": proj["name"], "version": 1}, indent=2).encode()
+        entries["project.json"] = json.dumps({
+            "id": proj["id"], "name": proj["name"], "version": 1, "scene_mode": proj["scene_mode"],
+            "output_goal": proj["output_goal"], "base_mode": proj["base_mode"], "style_recipe_id": proj["style_recipe_id"],
+            "approved_source_revision_id": proj["approved_source_id"],
+            "source_lineage": [x["id"] for x in self.sources.lineage(proj["approved_source_id"])] if proj["approved_source_id"] else [],
+            "created_with": "CozyVerse Breakdown 0.1.0"}, indent=2).encode()
         status = scene["export_completeness"]
         hashes = {k: hashlib.sha256(v).hexdigest() for k, v in entries.items()}
-        report.update({"status": status, "unique_model_count": len(assets), "instance_count": len(assets),
-                       "sha256": hashes})
+        report.update({"status": status, "unique_model_count": len(assets),
+                       "instance_count": sum(a["count"] for a in assets), "sha256": hashes})
         entries["reports/export_validation.json"] = json.dumps(report, indent=2).encode()
         eid = "e_" + uuid.uuid4().hex[:10]
         final = out_dir / f"{proj['slug']}_CozyVerse_0.1.0_{eid}.zip"
@@ -677,7 +865,7 @@ class Service:
         self.db.execute("INSERT INTO export_runs(id,project_id,status,path,report_json,created_at) VALUES(?,?,?,?,?,?)",
                         (eid, pid, status, str(final), dumps(report), now()))
         return {"message": f"Export {status}", "export_id": eid, "status": status, "path": str(final),
-                "folder": str(out_dir)}
+                "folder": str(out_dir), "incomplete": report["incomplete"]}
 
     def _view_job_json(self, a: dict, v: str, ve: dict) -> dict:
         cam = ve.get("camera") or {}
