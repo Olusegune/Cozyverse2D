@@ -15,9 +15,16 @@ from typing import Any, Callable, Optional
 import jsonschema
 
 from . import blender_adapter, qa
+from .mesh_import import validate_glb
 from .config import BLENDER_DIR, SCHEMA_DIR, Settings
 from .db import Database, dumps, now
+from .creation import Creator, Providers
+from .inventory import Inventory
 from .security import ASSET_CODE_RE, PathEscape, safe_join, slugify
+from .providers import build_registry
+from .secret_store import SecretStore, default_store
+from .sources import SourceStore
+from .styles import StyleStore
 
 if str(BLENDER_DIR) not in sys.path:
     sys.path.insert(0, str(BLENDER_DIR))
@@ -34,6 +41,8 @@ FIXTURES = {
     "chart": ("CHT-001", "Neutral test chart", "calibration"),
 }
 
+APPROVED_MESH = ("PROXY_APPROVED", "MESH_APPROVED")
+
 INFERRED = {
     "front": [], "back": ["unseen rear wall"], "left": ["unseen left wall"],
     "right": ["unseen right wall"], "perspective": [], "top": ["unseen roof"],
@@ -49,7 +58,7 @@ class Conflict(RuntimeError):
 
 
 class Service:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, secret_store: Optional[SecretStore] = None, registry: Optional[dict] = None):
         self.settings = settings
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         settings.projects_dir.mkdir(parents=True, exist_ok=True)
@@ -57,6 +66,12 @@ class Service:
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cv-job")
         self._cancel: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
+        self.sources = SourceStore(self.db, self.project_dir)
+        self.inv = Inventory(self.db, self.project_dir)
+        self.secrets = secret_store if secret_store is not None else default_store()
+        self.providers = Providers(self.db, self.secrets, registry if registry is not None else build_registry())
+        self.styles = StyleStore(self.db)
+        self.creator = Creator(self.db, self.providers, self.styles, self.sources, self.submit_generic, self.get_project)
         self.db.execute("UPDATE jobs SET state='FAILED', message='Interrupted by restart; run again', "
                         "updated_at=? WHERE state IN ('RUNNING','QUEUED','NEW')", (now(),))
 
@@ -86,11 +101,19 @@ class Service:
         return safe_join(self.project_dir(asset["project_id"]), "assets", asset["code"])
 
     # ---------- projects / assets ----------
-    def create_project(self, name: str, fixtures: list[str]) -> dict:
+    SCENE_MODES = ("DIORAMA", "REGULAR_IMAGE")
+    OUTPUT_GOALS = ("2D_LAYER_EXPORT", "REFERENCE_ONLY", "3D_PROXY", "3D_RECONSTRUCTION", "SCENE_REASSEMBLY")
+    BASE_MODES = ("NONE", "FOUNDATION", "LOCAL_PLINTH", "SCENE_CONTEXT", "MASTER_DIORAMA")
+
+    def create_project(self, name: str, fixtures: list[str], scene_mode: str = "DIORAMA",
+                       output_goal: str = "3D_RECONSTRUCTION") -> dict:
+        if scene_mode not in self.SCENE_MODES or output_goal not in self.OUTPUT_GOALS:
+            raise ValueError("bad scene mode or output goal")
         pid = "p_" + uuid.uuid4().hex[:12]
         slug = slugify(name)
-        self.db.execute("INSERT INTO projects(id,name,slug,scene_mode,created_at) VALUES(?,?,?,?,?)",
-                        (pid, name, slug, "DIORAMA", now()))
+        base_mode = "MASTER_DIORAMA" if scene_mode == "DIORAMA" else "NONE"   # regular images never get a forced base
+        self.db.execute("INSERT INTO projects(id,name,slug,scene_mode,created_at,output_goal,base_mode) "
+                        "VALUES(?,?,?,?,?,?,?)", (pid, name, slug, scene_mode, now(), output_goal, base_mode))
         self.project_dir(pid).mkdir(parents=True, exist_ok=True)
         for f in fixtures:
             self.add_asset(pid, f)
@@ -101,6 +124,25 @@ class Service:
         if not row:
             raise NotFound("project")
         return row
+
+    def update_project(self, pid: str, fields: dict) -> dict:
+        """Mode/goal switches never delete revisions, masks or recipes (provenance is kept)."""
+        self.get_project(pid)
+        allowed = {"scene_mode": self.SCENE_MODES, "output_goal": self.OUTPUT_GOALS, "base_mode": self.BASE_MODES}
+        for k, v in fields.items():
+            if k == "name":
+                if not (isinstance(v, str) and 1 <= len(v.strip()) <= 120):
+                    raise ValueError("bad name")
+                self.db.execute("UPDATE projects SET name=? WHERE id=?", (v.strip(), pid))
+            elif k == "style_recipe_id":
+                self.db.execute("UPDATE projects SET style_recipe_id=? WHERE id=?", (v, pid))
+            elif k in allowed:
+                if v not in allowed[k]:
+                    raise ValueError(f"bad {k}")
+                self.db.execute(f"UPDATE projects SET {k}=? WHERE id=?", (v, pid))
+            else:
+                raise ValueError(f"cannot edit {k}")
+        return self.get_project(pid)
 
     def list_projects(self) -> list[dict]:
         return self.db.all("SELECT * FROM projects ORDER BY created_at DESC")
@@ -156,7 +198,7 @@ class Service:
         return {"id": a["id"], "project_id": a["project_id"], "code": a["code"], "name": a["name"],
                 "category": a["category"], "fixture": a["fixture"], "mesh_status": a["mesh_status"],
                 "model_revision": a["model_revision"], "params": json.loads(a["params_json"]),
-                "views": views}
+                "views": views, **self.inv.view(a)}
 
     # ---------- jobs ----------
     def _new_job(self, kind: str, subject: str, key: Optional[str] = None) -> str:
@@ -203,6 +245,12 @@ class Service:
 
         self._pool.submit(run)
 
+    def submit_generic(self, kind: str, subject: str, fn) -> str:
+        """Queue any worker function as a job (one at a time, cancellable, failures surface on the job)."""
+        jid = self._new_job(kind, subject)
+        self._submit(jid, fn)
+        return jid
+
     def get_job(self, jid: str) -> dict:
         row = self.db.one("SELECT * FROM jobs WHERE id=?", (jid,))
         if not row:
@@ -232,6 +280,15 @@ class Service:
     # ---------- proxy ----------
     def _spec_for(self, asset: dict) -> dict:
         params = json.loads(asset["params_json"])
+        mesh = params.pop("_mesh", None)
+        if asset["mesh_source"] == "imported" and mesh:
+            path = self.asset_dir(asset) / "mesh" / "imported.glb"
+            return proxy_spec.mesh_spec(asset["code"], asset["name"], str(path), mesh["sha256"],
+                                        mesh.get("yaw_deg", 0), mesh.get("target_height"))
+        if asset["fixture"] == "custom":
+            return proxy_spec.parametric_spec(asset["code"], asset["name"], asset["category"], params)
+        if asset["fixture"] == "master_base":
+            return proxy_spec.master_base_spec(**{k: v for k, v in params.items() if k in proxy_spec.BASE_PARAMS})
         if asset["fixture"] == "bar":
             return proxy_spec.bar_spec(plinth_margin=params.get("plinth_margin", 0.5),
                                        plinth_height=params.get("plinth_height", 0.2))
@@ -240,13 +297,26 @@ class Service:
     def build_proxy(self, aid: str, params: Optional[dict] = None) -> str:
         asset = self.get_asset(aid)
         if params is not None:
+            keep = json.loads(asset["params_json"]).get("_mesh")
+            if asset["fixture"] == "custom":
+                params = proxy_spec.clean_params(asset["category"], params)
+            elif asset["fixture"] == "master_base":
+                params = proxy_spec.clean_base_params(params)
+            elif asset["fixture"] == "bar":
+                ok = {"plinth_margin": (0.0, 5.0), "plinth_height": (0.02, 1.0)}
+                for k, v in params.items():
+                    if k not in ok or not isinstance(v, (int, float)) or isinstance(v, bool) or not ok[k][0] <= v <= ok[k][1]:
+                        raise ValueError(f"bad parameter {k}")
+            if keep:
+                params = {**params, "_mesh": keep}
             self.db.execute("UPDATE assets SET params_json=? WHERE id=?", (dumps(params), aid))
         jid = self._new_job("mesh_proxy", aid)
 
         def work(ev: threading.Event) -> dict:
+            self.db.execute("UPDATE assets SET mesh_source='proxy' WHERE id=?", (aid,))   # procedural source
             a = self.get_asset(aid)
             spec = self._spec_for(a)
-            rev = proxy_spec.spec_hash(spec)
+            rev = proxy_spec.spec_hash_stable(spec)
             d = self.asset_dir(a)
             (d / "mesh").mkdir(parents=True, exist_ok=True)
             spec_path = d / "mesh" / "spec.json"
@@ -257,14 +327,108 @@ class Service:
                                         view="front", policy="full_master_base" if a["category"] == "master_base" else "local_plinth",
                                         mode="glb", cancel=ev, include="asset,foundation,plinth")
             old = a["model_revision"]
-            self.db.execute("UPDATE assets SET model_revision=?, mesh_status='PROXY_APPROVED' WHERE id=?",
-                            (rev, aid))
+            self.db.execute("UPDATE assets SET model_revision=?, mesh_status='PROXY_APPROVED', mesh_source='proxy' "
+                            "WHERE id=?", (rev, aid))
             if old and old != rev:
                 self._invalidate_views(aid)
             return {"message": "Proxy built", "model_revision": rev, "mesh": "mesh/canonical.glb"}
 
         self._submit(jid, work)
         return jid
+
+    # ---------- sources and inventory ----------
+    def add_source(self, pid: str, data: bytes, origin: str = "IMPORTED", parent_id: Optional[str] = None,
+                   meta: Optional[dict] = None) -> dict:
+        self.get_project(pid)
+        return self.sources.add(pid, data, origin, parent_id, meta)
+
+    def approve_source(self, pid: str, rid: str) -> dict:
+        self.get_project(pid)
+        return self.sources.approve(pid, rid)
+
+    def create_inventory(self, pid: str, fields: dict) -> dict:
+        proj = self.get_project(pid)
+        fields = dict(fields)
+        if fields.get("bbox") is not None:
+            src = fields.get("source_revision_id") or proj["approved_source_id"]
+            if not src:
+                raise Conflict("Approve a source image before adding items to the inventory.")
+            row = self.db.one("SELECT approved_at FROM source_revisions WHERE id=?", (src,))
+            if not row or row["approved_at"] is None:
+                raise Conflict("That source image is not approved yet.")
+            fields["source_revision_id"] = src
+        return self.asset_view(self.inv.create(pid, fields))
+
+    def update_inventory(self, aid: str, fields: dict) -> dict:
+        a = self.inv.update(aid, fields)
+        if "category" in fields:
+            self.db.execute("UPDATE assets SET params_json='{}' WHERE id=?", (aid,))   # old proxy params no longer fit
+        return self.asset_view(a)
+
+    def delete_inventory(self, aid: str) -> None:
+        a = self.get_asset(aid)
+        self.inv.delete(aid)
+        shutil.rmtree(self.asset_dir(a), ignore_errors=True)
+
+    def merge_inventory(self, pid: str, ids: list[str], into: str) -> dict:
+        self.get_project(pid)
+        a = self.inv.merge(pid, ids, into)
+        return self.asset_view(a)
+
+    def inventory_tree(self, pid: str) -> list[dict]:
+        items = {x["id"]: {**x, "children": []} for x in self.list_assets(pid)}
+        roots = []
+        for it in items.values():
+            parent = items.get(it["parent_id"]) if it.get("parent_id") else None
+            (parent["children"] if parent else roots).append(it)
+        return roots
+
+    # ---------- imported meshes ----------
+    def import_mesh(self, aid: str, data: bytes) -> dict:
+        a = self.get_asset(aid)
+        if a["fixture"] == "master_base":
+            raise Conflict("the master base is built with the base designer")
+        info = validate_glb(data)
+        d = self.asset_dir(a) / "mesh"
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / "imported.glb.tmp"
+        tmp.write_bytes(data)
+        tmp.replace(d / "imported.glb")
+        import hashlib as _h
+        sha = _h.sha256(data).hexdigest()
+        params = json.loads(a["params_json"])
+        params["_mesh"] = {"sha256": sha, "yaw_deg": 0, "target_height": None, "summary": info}
+        self.db.execute("UPDATE assets SET params_json=?, mesh_source='imported', "
+                        "mesh_status='IMPORTED_PENDING_REVIEW' WHERE id=?", (dumps(params), aid))
+        self._invalidate_views(aid)
+        return self.asset_view(self.get_asset(aid))
+
+    def set_mesh_orientation(self, aid: str, yaw_deg: int, target_height: Optional[float]) -> dict:
+        a = self.get_asset(aid)
+        params = json.loads(a["params_json"])
+        if a["mesh_source"] != "imported" or "_mesh" not in params:
+            raise Conflict("this asset has no imported mesh")
+        proxy_spec.mesh_spec(a["code"], a["name"], "x", params["_mesh"]["sha256"], yaw_deg, target_height)  # validates
+        params["_mesh"].update({"yaw_deg": yaw_deg, "target_height": target_height})
+        self.db.execute("UPDATE assets SET params_json=?, mesh_status='IMPORTED_PENDING_REVIEW' WHERE id=?",
+                        (dumps(params), aid))
+        self._invalidate_views(aid)
+        return self.asset_view(self.get_asset(aid))
+
+    def approve_mesh(self, aid: str) -> dict:
+        a = self.get_asset(aid)
+        if a["mesh_source"] != "imported" or a["mesh_status"] != "IMPORTED_PENDING_REVIEW":
+            raise Conflict("no imported mesh is waiting for review")
+        spec = self._spec_for(a)
+        rev = proxy_spec.spec_hash_stable(spec)
+        d = self.asset_dir(a) / "mesh"
+        shutil.copyfile(d / "imported.glb", d / "canonical.glb")
+        (d / "spec.json").write_text(json.dumps(spec, indent=2), encoding="utf8")
+        old = a["model_revision"]
+        self.db.execute("UPDATE assets SET model_revision=?, mesh_status='MESH_APPROVED' WHERE id=?", (rev, aid))
+        if old and old != rev:
+            self._invalidate_views(aid)
+        return self.asset_view(self.get_asset(aid))
 
     def _invalidate_views(self, aid: str) -> None:
         for r in self.db.all("SELECT * FROM view_renders WHERE asset_id=?", (aid,)):
@@ -277,13 +441,16 @@ class Service:
 
     # ---------- render five ----------
     def default_policies(self, asset: dict) -> dict:
+        proj = self.get_project(asset["project_id"])
+        if proj["scene_mode"] == "REGULAR_IMAGE" and proj["base_mode"] == "NONE":
+            return {v: "none" for v in VIEWS}          # regular images do not get a forced base
         if asset["category"] == "building":
             return {v: "building_foundation" for v in cv_camera.ORTHO_VIEWS} | {"perspective": "local_plinth"}
         return {v: "none" for v in VIEWS}
 
     def render_five(self, aid: str, opts: dict) -> str:
         asset = self.get_asset(aid)
-        if asset["mesh_status"] != "PROXY_APPROVED" or not asset["model_revision"]:
+        if asset["mesh_status"] not in APPROVED_MESH or not asset["model_revision"]:
             raise Conflict("No approved geometry. Build a proxy or import a mesh first.")
         key = hashlib.sha256(dumps([aid, asset["model_revision"], opts]).encode()).hexdigest()
         jid = self._new_job("five_render", aid, key)
@@ -294,7 +461,7 @@ class Service:
         a = self.get_asset(aid)
         blender = self._blender()
         spec = self._spec_for(a)
-        rev = proxy_spec.spec_hash(spec)
+        rev = proxy_spec.spec_hash_stable(spec)
         d = self.asset_dir(a)
         (d / "views").mkdir(parents=True, exist_ok=True)
         (d / "qa").mkdir(parents=True, exist_ok=True)
@@ -306,16 +473,17 @@ class Service:
         render_spec_path = d / "qa" / "render_spec.json"
         render_spec_path.write_text(json.dumps(full), encoding="utf8")
         res = opts["resolution"]
+        only = [v for v in (opts.get("views") or VIEWS) if v in VIEWS]
         done, failed = 0, []
         pending = dumps({"stale": True, "findings": [{"code": "RENDER_PENDING", "severity": "critical",
                                                        "detail": "re-render in progress"}]})
-        for v in VIEWS:
+        for v in only:
             self.db.execute("UPDATE view_renders SET status='BLOCKED', qa_json=?, updated_at=? "
                             "WHERE asset_id=? AND view=?", (pending, now(), aid, v))
-        for i, v in enumerate(VIEWS):
+        for i, v in enumerate(only):
             if ev.is_set():
                 raise blender_adapter.Cancelled()
-            self._update_job(jid, message=f"Rendering {v} ({i + 1}/5)", progress=i / 5.0)
+            self._update_job(jid, message=f"Rendering {v} ({i + 1}/{len(only)})", progress=i / len(only))
             out = d / "views" / f"{v}.png"
             meta_p = d / "qa" / f"{v}_meta.json"
             try:
@@ -349,9 +517,9 @@ class Service:
                                                       "detail": str(e)[:300]}]}), now(), aid, v))
         self._write_asset_manifest(aid, opts, policies)
         if failed:
-            return {"_state": "FAILED", "message": f"{done}/5 views rendered; failed: {', '.join(failed)}",
+            return {"_state": "FAILED", "message": f"{done}/{len(only)} views rendered; failed: {', '.join(failed)}",
                     "failed": failed}
-        return {"message": "5/5 views rendered", "views": list(VIEWS)}
+        return {"message": f"{len(only)}/{len(only)} views rendered", "views": only}
 
     # ---------- review ----------
     def review_view(self, aid: str, view: str, status: str, note: str = "") -> dict:
@@ -414,7 +582,7 @@ class Service:
             qa_status = "DRAFT"
         issues = sorted({f["code"] for r in view_rows.values() if r["qa_json"]
                          for f in json.loads(r["qa_json"]).get("findings", [])})
-        mesh = {"path": "mesh/canonical.glb" if a["mesh_status"] == "PROXY_APPROVED" else None,
+        mesh = {"path": "mesh/canonical.glb" if a["mesh_status"] in APPROVED_MESH else None,
                 "status": a["mesh_status"], "revision": a["model_revision"]}
         return {
             "asset_id": a["code"], "name": a["name"], "category": a["category"], "parent_id": None,
@@ -456,7 +624,7 @@ class Service:
             d = self.asset_dir(a)
             prefix = f"assets/{a['code']}/"
             entries[prefix + "asset.json"] = json.dumps(manifest, indent=2).encode()
-            a_ok = manifest["qa"]["status"] == "PASSED" and a["mesh_status"] == "PROXY_APPROVED"
+            a_ok = manifest["qa"]["status"] == "PASSED" and a["mesh_status"] in APPROVED_MESH
             for v in VIEWS:
                 ve = manifest["views"][v]
                 if ve["path"] and not ve["stale"]:

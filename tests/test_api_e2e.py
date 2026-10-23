@@ -134,7 +134,7 @@ def test_golden_path(client):
 
     # editing the model invalidates every view and the export falls back to PARTIAL
     j = wait(client, client.post(f"/assets/{aid}/build-proxy", headers=H,
-                                 json={"plinth_margin": 1.2, "plinth_height": 0.3}).json()["job_id"])
+                                 json={"params": {"plinth_margin": 1.2, "plinth_height": 0.3}}).json()["job_id"])
     assert j["result"]["model_revision"] != rev1
     asset = next(x for x in client.get(f"/projects/{pid}/assets", headers=H).json() if x["code"] == "BLD-003")
     assert all(asset["views"][v]["stale"] and asset["views"][v]["status"] == "BLOCKED" for v in VIEWS)

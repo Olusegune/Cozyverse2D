@@ -95,6 +95,14 @@ def build_part(part, color_override=None, flat=False):
         bmesh.ops.create_cube(bm, size=1.0)
     elif shape == "cylinder":
         bmesh.ops.create_cone(bm, cap_ends=True, segments=48, radius1=0.5, radius2=0.5, depth=1.0)
+    elif shape == "sphere":
+        bmesh.ops.create_uvsphere(bm, u_segments=32, v_segments=16, radius=0.5)
+    elif shape == "prism":   # triangular roof: ridge along Y
+        v = [bm.verts.new(c) for c in ((-0.5, -0.5, -0.5), (0.5, -0.5, -0.5), (0.0, -0.5, 0.5),
+                                       (-0.5, 0.5, -0.5), (0.5, 0.5, -0.5), (0.0, 0.5, 0.5))]
+        for idx in ((0, 2, 1), (3, 4, 5), (0, 1, 4, 3), (1, 2, 5, 4), (2, 0, 3, 5)):
+            bm.faces.new([v[i] for i in idx])
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     else:
         raise ValueError(shape)
     sx, sy, sz = part["size"]
@@ -123,9 +131,46 @@ def build_part(part, color_override=None, flat=False):
     obj.location = Vector(part["center"])
     if "rotate_y_deg" in part:
         obj.rotation_euler = (0.0, math.radians(part["rotate_y_deg"]), 0.0)
+    if "rotate_deg" in part:
+        obj.rotation_euler = tuple(math.radians(a) for a in part["rotate_deg"])
     obj["cv_class"] = part["class"]
     bpy.context.scene.collection.objects.link(obj)
     return obj
+
+
+def import_mesh_part(part, color_override=None, flat=False):
+    """Import a validated GLB, apply yaw / target height, and put the bottom centre of its bounds at the origin."""
+    before = set(bpy.data.objects)
+    bpy.ops.import_scene.gltf(filepath=part["mesh_path"])
+    new = [o for o in bpy.data.objects if o not in before]
+    for o in new:                       # flatten parenting, keeping world transforms
+        mw = o.matrix_world.copy()
+        o.parent = None
+        o.matrix_world = mw
+    meshes = [o for o in new if o.type == "MESH"]
+    for o in new:
+        if o.type != "MESH":
+            bpy.data.objects.remove(o, do_unlink=True)
+    if not meshes:
+        raise RuntimeError("imported file has no mesh objects")
+    bpy.context.view_layer.update()
+    lo, hi = world_bounds(meshes)
+    cx, cy = (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2
+    yaw = math.radians(part.get("yaw_deg", 0))
+    scale = 1.0
+    if part.get("target_height"):
+        h = hi[2] - lo[2]
+        scale = part["target_height"] / h if h > 1e-9 else 1.0
+    rot = Matrix.Rotation(yaw, 4, "Z")
+    centre = Matrix.Translation((-cx, -cy, -lo[2]))
+    xf = Matrix.Scale(scale, 4) @ rot @ centre
+    for o in meshes:
+        o.matrix_world = xf @ o.matrix_world
+        o["cv_class"] = part["class"]
+        if color_override is not None or flat:
+            o.data.materials.clear()
+            o.data.materials.append(make_material(color_override or (200, 200, 200), 0.0, True))
+    return meshes
 
 
 def world_bounds(objs):
@@ -264,7 +309,10 @@ def main():
     objs = []
     for p in parts:
         override = proxy_spec.CLASS_MASK_COLORS[p["class"]] if args.mode == "mask" else None
-        objs.append(build_part(p, color_override=override, flat=flat))
+        if p["shape"] == "mesh":
+            objs.extend(import_mesh_part(p, color_override=override, flat=flat))
+        else:
+            objs.append(build_part(p, color_override=override, flat=flat))
     bpy.context.view_layer.update()
 
     meta = {
@@ -272,7 +320,7 @@ def main():
         "pid": os.getpid(),
         "mode": args.mode,
         "asset_id": spec.get("asset_id"),
-        "model_revision": proxy_spec.spec_hash(spec),
+        "model_revision": proxy_spec.spec_hash_stable(spec),
         "base_policy": args.policy,
         "included_classes": include,
         "included_objects": sorted(o.name for o in objs),
