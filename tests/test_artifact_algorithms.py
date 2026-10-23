@@ -180,3 +180,35 @@ def test_lightness_dependent_curve_fixes_multiplicative_casts_better_than_one_sh
         d = aq.srgb_to_lab(img)[..., 1:] - aq.srgb_to_lab(clean)[..., 1:]
         return np.mean([np.hypot(d[p][..., 0], d[p][..., 1]).mean() for p in patches])
     assert err(two) < err(one) and err(two) < 1.5, (err(one), err(two))
+
+
+def beige_only(size=256):
+    img = np.full((size, size, 3), 255, np.uint8)
+    img[40:220, 40:220] = (176, 160, 140)               # one warm beige wall: a legitimate surface colour
+    img[100:140, 80:120] = (150, 136, 118)              # its own darker shade
+    return img
+
+
+def test_a_lone_beige_object_is_a_review_hint_never_a_critical_cast():
+    rep = aq.analyze(beige_only())
+    c = rep["metrics"]["cast"]
+    assert c["ok"] and c["confidence"] == "low" and c["magnitude"] >= aq.CAST_WARN
+    f = [f for f in rep["findings"] if f["code"] == "COLOR_CAST"]
+    assert f and f[0]["severity"] == "review" and "real colour" in f[0]["detail"]
+    strong = np.full((256, 256, 3), 255, np.uint8); strong[40:220, 40:220] = (210, 175, 110)
+    r2 = aq.analyze(strong)["findings"]
+    assert not [f for f in r2 if f["code"] == "COLOR_CAST" and f["severity"] == "critical"]
+
+
+def test_genuinely_neutral_surfaces_rule_out_a_cast_even_next_to_warm_objects():
+    img = beige_only()
+    img[150:200, 140:210] = (128, 128, 128)              # a real grey surface
+    c = aq.analyze(img)["metrics"]["cast"]
+    assert c["ok"] and c["neutral_surfaces_present"] and c["magnitude"] == 0.0
+    assert not [f for f in aq.analyze(img)["findings"] if f["code"] == "COLOR_CAST"]
+
+
+def test_a_cast_confirmed_by_several_surfaces_is_high_confidence():
+    img, _ = scene(cast=YELLOW)
+    c = aq.analyze(img)["metrics"]["cast"]
+    assert c["confidence"] == "high" and c["peaks"] >= 2

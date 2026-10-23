@@ -17,3 +17,7 @@ evidence/smoke/
 branding/*-transparent.png
 apps/desktop/src-tauri/gen/
 .commitmsg.txt
+
+runtime/
+dist-installer/
+apps/desktop/src-tauri/target/

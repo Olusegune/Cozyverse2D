@@ -253,7 +253,8 @@ class StyleStore:
         return {"id": style_id, "version": s.get("version", 1), "label": s.get("label"), "recipe": s}
 
     def compile(self, style_id: Optional[str], user_prompt: str, negative: str = "", scene_mode: str = "REGULAR_IMAGE",
-                caps: Optional[dict] = None, strength: Optional[float] = None) -> StyleCompileResult:
+                caps: Optional[dict] = None, strength: Optional[float] = None,
+                recipe: Optional[dict] = None) -> StyleCompileResult:
         caps = caps or {}
         warnings: list[str] = []
         truncated: list[str] = []
@@ -263,8 +264,13 @@ class StyleStore:
         parts: list[str] = []
         negs: list[str] = [n.strip() for n in negative.split(",") if n.strip()]
         eff_strength = None
-        if style_id:
+        if recipe is not None:                       # an unsaved recipe being previewed in the editor
+            clean = self.validate_recipe(recipe)
+            s = {**clean, "label": clean["name"], "traits": ""}
+            style_id = "(unsaved)"
+        elif style_id:
             s = self.resolve(style_id)
+        if style_id:
             eff_strength = strength if strength is not None else s.get("strength", 0.7)
             word = next(w for lim, w in STRENGTH_WORDS if eff_strength < lim)
             traits = [s["traits"]] if s.get("traits") else []

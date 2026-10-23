@@ -173,7 +173,7 @@ class MeshGen:
                 row = self.db.one("SELECT * FROM model_registry WHERE provider=? AND model_id=?", (p.id, m.id))
                 if row and m.status != "disabled":
                     m.status, m.status_detail, m.last_checked = row["status"], row["status_detail"], row["last_checked"]
-                ms.append(m.public())
+                ms.append({**m.public(), "price_usd": self.prov.price(m.id)})
             out.append({"id": p.id, "label": p.label, "needs_key": p.needs_key, "configured": self.prov.configured_any(p),
                         "docs_url": p.docs_url, "models": ms})
         return out

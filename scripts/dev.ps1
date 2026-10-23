@@ -5,6 +5,7 @@ $root = Split-Path -Parent $PSScriptRoot
 "VITE_WORKER_URL=http://127.0.0.1:$WorkerPort`nVITE_WORKER_TOKEN=$Token" | Set-Content -Encoding ascii "$root\apps\desktop\.env.local"
 New-Item -ItemType Directory -Force "$root\evidence\devdata" | Out-Null
 $env:CV_WORKER_TOKEN = $Token
+$env:CV_DEV_ORIGINS = "1"
 Start-Process -FilePath "$root\.venv\Scripts\python.exe" -ArgumentList "-m", "cozyverse_worker", "--port", $WorkerPort, "--data-dir", "$root\evidence\devdata" `
   -WorkingDirectory "$root\worker" -WindowStyle Hidden -RedirectStandardOutput "$root\evidence\worker.out.log" -RedirectStandardError "$root\evidence\worker.err.log"
 Start-Process -FilePath cmd.exe -ArgumentList "/c", "npm run dev" -WorkingDirectory "$root\apps\desktop" -WindowStyle Hidden `

@@ -93,8 +93,32 @@ def foreground(rgb: np.ndarray, alpha: Optional[np.ndarray], white_bg: bool = Tr
 
 
 # ----------------------------------------------------------------------------- analyses
+def _peaks(a: np.ndarray, b: np.ndarray, bins: np.ndarray, floor: int, limit: int = 5) -> list[dict]:
+    """Distinct clusters in (a*, b*) space, strongest first."""
+    h, ea, eb = np.histogram2d(a, b, bins=[bins, bins])
+    ca, cb = (ea[:-1] + ea[1:]) / 2, (eb[:-1] + eb[1:]) / 2
+    out = []
+    for _ in range(limit):
+        ia, ib = np.unravel_index(np.argmax(h), h.shape)
+        if h[ia, ib] < 1:
+            break
+        pa, pb = float(ca[ia]), float(cb[ib])
+        members = np.hypot(a - pa, b - pb) < 3.0
+        if int(members.sum()) < floor:
+            break
+        out.append({"a": float(np.median(a[members])), "b": float(np.median(b[members])), "count": int(members.sum())})
+        near = (np.hypot(ca[:, None] - pa, cb[None, :] - pb) < 4.5)
+        h = np.where(near, 0, h)
+    return out
+
+
 def cast_estimate(lab: np.ndarray, fg: np.ndarray) -> dict:
-    """Dominant near-neutral cluster in (a*, b*). Under a global cast the grey surfaces share one shifted position."""
+    """Is there a global colour cast?
+
+    * Truly neutral surfaces present: no cast (a cast would have shifted them too).
+    * Several distinct neutral clusters all shifted the same way: confident cast.
+    * One warm/cool cluster only: could be a real surface colour (a beige wall), so it is low confidence and left to a person.
+    """
     L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
     chroma = np.hypot(a, b)
     cand = fg & (L > 12) & (L < 94) & (chroma <= NEUTRAL_MAX_CHROMA)
@@ -103,15 +127,22 @@ def cast_estimate(lab: np.ndarray, fg: np.ndarray) -> dict:
     if n < max(300, 0.01 * n_fg):
         return {"ok": False, "reason": "not enough neutral surfaces to estimate a cast", "neutral_pixels": n}
     bins = np.arange(-NEUTRAL_MAX_CHROMA - 1, NEUTRAL_MAX_CHROMA + 2, 1.5)
-    h, ea, eb = np.histogram2d(a[cand], b[cand], bins=[bins, bins])
-    ia, ib = np.unravel_index(np.argmax(h), h.shape)
-    peak_a, peak_b = (ea[ia] + ea[ia + 1]) / 2, (eb[ib] + eb[ib + 1]) / 2
-    near = cand & (np.hypot(a - peak_a, b - peak_b) < 4.0)
-    share = float(near.sum()) / n
-    ca, cb = float(np.median(a[near])), float(np.median(b[near]))
-    mag = float(np.hypot(ca, cb))
-    if share < 0.12:                                      # no dominant neutral cluster: do not guess
-        return {"ok": False, "reason": "no dominant neutral surface", "neutral_pixels": n, "share": share}
+    peaks = _peaks(a[cand], b[cand], bins, floor=max(120, int(0.01 * n_fg)))
+    if not peaks:
+        return {"ok": False, "reason": "no dominant neutral surface", "neutral_pixels": n}
+    pure = [p for p in peaks if np.hypot(p["a"], p["b"]) < 2.5 and p["count"] >= 0.03 * n_fg]
+    dom = peaks[0]
+    share = dom["count"] / float(n)
+    mag = float(np.hypot(dom["a"], dom["b"]))
+    if pure:
+        return {"ok": True, "a": 0.0, "b": 0.0, "magnitude": 0.0, "direction": "none", "confidence": "high",
+                "neutral_pixels": n, "share": share, "peaks": len(peaks), "neutral_surfaces_present": True,
+                "curve": [], "mask": np.zeros_like(fg)}
+    ang = lambda p: np.degrees(np.arctan2(p["b"], p["a"]))
+    agree = [p for p in peaks[1:] if np.hypot(p["a"], p["b"]) >= 3.0 and abs((ang(p) - ang(dom) + 180) % 360 - 180) < 35]
+    confidence = "high" if agree else "low"
+    near = cand & (np.hypot(a - dom["a"], b - dom["b"]) < 4.0)
+    ca, cb = dom["a"], dom["b"]
     direction = "yellow" if cb > 0 and cb >= abs(ca) else "orange" if cb > 0 and ca > 0 else "other"
     # A multiplicative cast tints light greys more than dark ones, so also measure the cast per lightness band.
     curve = []
@@ -119,14 +150,14 @@ def cast_estimate(lab: np.ndarray, fg: np.ndarray) -> dict:
         band = cand & (L >= lo) & (L < hi)
         if band.sum() < 150:
             continue
-        hb, eab, ebb = np.histogram2d(a[band], b[band], bins=[bins, bins])
-        ja, jb = np.unravel_index(np.argmax(hb), hb.shape)
-        pa, pb = (eab[ja] + eab[ja + 1]) / 2, (ebb[jb] + ebb[jb + 1]) / 2
-        nb = band & (np.hypot(a - pa, b - pb) < 4.0)
-        if nb.sum() >= 0.2 * band.sum():
-            curve.append([float(np.median(L[nb])), float(np.median(a[nb])), float(np.median(b[nb]))])
-    return {"ok": True, "a": ca, "b": cb, "magnitude": mag, "direction": direction, "neutral_pixels": n,
-            "share": share, "mask": near, "curve": curve}
+        bp = _peaks(a[band], b[band], bins, floor=100, limit=1)
+        if bp:
+            nb = band & (np.hypot(a - bp[0]["a"], b - bp[0]["b"]) < 4.0)
+            if nb.sum() >= 0.2 * band.sum():
+                curve.append([float(np.median(L[nb])), bp[0]["a"], bp[0]["b"]])
+    return {"ok": True, "a": ca, "b": cb, "magnitude": mag, "direction": direction, "confidence": confidence,
+            "neutral_pixels": n, "share": share, "peaks": len(peaks), "neutral_surfaces_present": False,
+            "mask": near, "curve": curve}
 
 
 def noise_estimate(lab: np.ndarray, fg: np.ndarray, block: int = 16) -> dict:
@@ -191,10 +222,14 @@ def analyze(img, settings: Optional[ArtifactSettings] = None, *, category: Optio
             if s.mode == "scene_grade":
                 findings.append({"code": "CAST_SCENE_GRADE", "severity": "info", "score": c["magnitude"],
                                  "detail": "Warm scene grade is on. A cast is expected and left alone."})
+            elif c["magnitude"] >= CAST_WARN and c["confidence"] == "low":
+                findings.append({"code": "COLOR_CAST", "severity": "review", "score": c["magnitude"],
+                                 "detail": f"The main light surface leans {c['direction']} by {c['magnitude']:.1f} (Lab), but no other neutral "
+                                           "surface confirms a cast. It may simply be the real colour of the object. A person should decide."})
             elif c["magnitude"] >= CAST_WARN:
                 sev = "critical" if c["magnitude"] >= CAST_CRITICAL else "warning"
                 findings.append({"code": "COLOR_CAST", "severity": sev, "score": c["magnitude"],
-                                 "detail": f"Neutral surfaces lean {c['direction']} by {c['magnitude']:.1f} (Lab). "
+                                 "detail": f"Neutral surfaces lean {c['direction']} by {c['magnitude']:.1f} (Lab), confirmed by several surfaces. "
                                            "Lamps and neon are protected. Prefer re-rendering with neutral lighting."})
     if s.reduce_noise:
         n = noise_estimate(lab, fg)

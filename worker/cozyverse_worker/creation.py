@@ -106,7 +106,7 @@ class Providers:
         out = []
         for p in self.registry.values():
             out.append({"id": p.id, "label": p.label, "needs_key": p.needs_key, "configured": self.configured(p.id),
-                        "docs_url": p.docs_url, "models": [self.overlay(m).public() for m in p.models()]})
+                        "docs_url": p.docs_url, "models": [{**self.overlay(m).public(), "price_usd": self.price(m.id)} for m in p.models()]})
         return out
 
     def refresh(self, pid: str) -> dict:

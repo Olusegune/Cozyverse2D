@@ -232,3 +232,13 @@ def test_source_cannot_be_used_across_projects(client):
     r = client.post(f"/projects/{p2}/inventory", headers=H,
                     json={"name": "x", "category": "prop", "bbox": [0.1, 0.1, 0.1, 0.1], "source_revision_id": src["id"]})
     assert r.status_code in (400, 409)
+
+
+def test_project_file_is_a_small_pointer_not_a_package(client):
+    pid = new_project(client)
+    r = client.get(f"/projects/{pid}/file", headers=H)
+    assert r.status_code == 200
+    doc = r.json()
+    assert doc == {"format": "cozyverse-project", "version": 1, "project_id": pid, "name": "Market", "slug": "market"}
+    assert len(r.content) < 400                                           # nothing but a pointer
+    assert client.get("/projects/p_nope/file", headers=H).status_code == 404

@@ -176,3 +176,38 @@ def test_reopen_project_keeps_state(blender, tmp_path):
         assert all(assets[0]["views"][v]["path"] for v in VIEWS)
         meta_cam = {v: assets[0]["views"][v] for v in VIEWS}
         assert all(m["sha256"] for m in meta_cam.values())
+
+
+def test_cors_allows_only_the_app_origins_by_default(client, monkeypatch):
+    for origin, ok in (("tauri://localhost", True), ("http://tauri.localhost", True), ("http://evil.example", False),
+                       ("http://127.0.0.1:1420", False)):
+        r = client.options("/projects", headers={"Origin": origin, "Access-Control-Request-Method": "GET",
+                                                 "Access-Control-Request-Headers": "authorization"})
+        assert (r.headers.get("access-control-allow-origin") == origin) is ok, origin
+
+
+def test_failure_after_three_views_never_yields_a_passed_set(client, monkeypatch):
+    from cozyverse_worker import blender_adapter
+    pid, a = make_project(client)
+    aid = a["BLD-003"]["id"]
+    wait(client, client.post(f"/assets/{aid}/build-proxy", headers=H).json()["job_id"])
+    real = blender_adapter.render_view
+
+    def flaky(*args, **kw):
+        if kw.get("view") == "right":
+            raise blender_adapter.BlenderError("simulated crash while rendering")
+        return real(*args, **kw)
+    monkeypatch.setattr(blender_adapter, "render_view", flaky)
+    j = wait(client, client.post(f"/assets/{aid}/render-five", headers=H, json=FAST).json()["job_id"])
+    assert j["state"] == "FAILED" and "failed: right" in j["message"] and "4/5" in j["message"]
+    views = client.get(f"/projects/{pid}/assets", headers=H).json()[0]["views"]
+    assert [views[v]["status"] for v in ("front", "back", "left")] == ["DRAFT"] * 3 or all(
+        views[v]["status"] in ("DRAFT", "NEEDS_REVIEW") for v in ("front", "back", "left"))
+    assert views["right"]["status"] == "FAILED" and views["right"]["path"] is None
+    for v in ("front", "back", "left", "perspective"):                          # the other four can be approved...
+        assert client.post(f"/assets/{aid}/views/{v}/review", headers=H, json={"status": "PASSED"}).status_code == 200
+    assert client.post(f"/assets/{aid}/views/right/review", headers=H, json={"status": "PASSED"}).status_code == 409   # ...the failed one cannot
+    ex = wait(client, client.post(f"/projects/{pid}/export", headers=H).json()["job_id"])
+    assert ex["result"]["status"] == "PARTIAL" and any("right" in r for r in ex["result"]["incomplete"]["BLD-003"])
+    manifest = json.loads(zipfile.ZipFile(ex["result"]["path"]).read("assets/BLD-003/asset.json"))
+    assert manifest["qa"]["status"] == "FAILED"

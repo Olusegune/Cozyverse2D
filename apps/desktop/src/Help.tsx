@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { DOCS, QUICK_START } from "./helpContent";
 
-function Modal(props: { title: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) {
+export function Modal(props: { title: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) {
   const ref = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
+  const closeRef = useRef(props.onClose);
+  closeRef.current = props.onClose;
+  useEffect(() => {                       // run once: focus the dialog on open, never again while the user types
     ref.current?.focus();
-    const h = (e: KeyboardEvent) => { if (e.key === "Escape") props.onClose(); };
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") closeRef.current(); };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [props]);
+  }, []);
   return (
     <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) props.onClose(); }}>
       <div className={`modal ${props.wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-label={props.title}>

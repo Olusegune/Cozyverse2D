@@ -494,3 +494,28 @@ def test_fetch_pins_ip_refuses_redirects_size_and_type():
     with pytest.raises(FetchRefused):
         fetch_bytes("https://cdn.example.com/a", resolver=pub("93.184.216.34"),
                     transport=httpx.MockTransport(lambda r: httpx.Response(200, content=b"<html>", headers={"content-type": "text/html"})))
+
+
+def test_unsaved_recipe_can_be_previewed_without_saving(env):
+    recipe = {"name": "Ink and teal", "dimensionality": "2D", "palette": "deep teal and cream", "strength": 0.9,
+              "negative_constraints": ["noise"]}
+    r = env.post("/styles/compile", headers=H, json={"recipe": recipe, "prompt": "A quiet harbour", "scene_mode": "REGULAR_IMAGE"})
+    assert r.status_code == 200, r.text
+    assert r.json()["prompt"].startswith("A quiet harbour") and "deep teal and cream" in r.json()["prompt"]
+    assert "strongly" in r.json()["prompt"]
+    assert not [s for s in env.get("/styles", headers=H).json() if s["owner"] == "user"]          # nothing was saved
+    assert env.post("/styles/compile", headers=H, json={"recipe": {"name": ""}, "prompt": "x"}).status_code == 400
+
+
+def test_openai_mask_convention_is_converted_white_means_edit():
+    from cozyverse_worker.providers.openai import to_openai_mask
+    base = png_bytes(200, 100)
+    m = Image.new("L", (64, 32), 0)
+    for x in range(32, 64):
+        for y in range(32):
+            m.putpixel((x, y), 255)                       # right half is the region to edit
+    buf = io.BytesIO(); m.save(buf, "PNG")
+    out = Image.open(io.BytesIO(to_openai_mask(buf.getvalue(), base)))
+    assert out.mode == "RGBA" and out.size == (200, 100)               # same size as the base image
+    assert out.getpixel((150, 50))[3] == 0                             # edit area is transparent
+    assert out.getpixel((20, 50))[3] == 255                            # everything else is kept

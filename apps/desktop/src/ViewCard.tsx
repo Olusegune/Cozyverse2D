@@ -10,7 +10,7 @@ const STATUS: Record<ViewStatus, { text: string; tone: string }> = {
 
 export function ViewCard(props: {
   asset: Asset; view: ViewName; api: Api; disabled: boolean;
-  onReview: (s: "PASSED" | "FAILED") => void;
+  onReview: (s: "PASSED" | "FAILED") => void; onRerender?: () => void; canRender?: boolean;
 }) {
   const { asset, view, api } = props;
   const info = asset.views[view];
@@ -61,6 +61,9 @@ export function ViewCard(props: {
         <div className="row">
           <button className="btn sm" disabled={!canReview || info.status === "PASSED"} onClick={() => props.onReview("PASSED")}>Approve</button>
           <button className="btn sm danger" disabled={!canReview || info.status === "FAILED"} onClick={() => props.onReview("FAILED")}>Reject</button>
+          <a className={`btn sm ${url ? "" : "disabled"}`} href={url ?? undefined} download={`${asset.code}_${view}.png`} aria-disabled={!url}
+            onClick={(e) => { if (!url) e.preventDefault(); }} title="Save this image as its own file">Save PNG</a>
+          {props.onRerender && <button className="btn sm" disabled={!props.canRender || props.disabled} onClick={props.onRerender} title="Render only this view again">Re-render</button>}
         </div>
       </div>
     </article>

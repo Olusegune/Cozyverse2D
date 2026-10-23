@@ -30,10 +30,14 @@ OutputGoal = Literal["2D_LAYER_EXPORT", "REFERENCE_ONLY", "3D_PROXY", "3D_RECONS
 BaseMode = Literal["NONE", "FOUNDATION", "LOCAL_PLINTH", "SCENE_CONTEXT", "MASTER_DIORAMA"]
 Category = Literal[tuple(CATEGORIES)]  # type: ignore[valid-type]
 
-ALLOWED_ORIGINS = [
-    "http://localhost:1420", "http://127.0.0.1:1420",      # vite dev
-    "tauri://localhost", "http://tauri.localhost", "https://tauri.localhost",  # packaged app
-]
+TAURI_ORIGINS = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]   # packaged app
+DEV_ORIGINS = ["http://localhost:1420", "http://127.0.0.1:1420"]                               # vite dev server
+
+
+def allowed_origins() -> list[str]:
+    """Dev origins are opt-in (CV_DEV_ORIGINS=1, set only by the dev script and debug builds), never in releases."""
+    import os
+    return TAURI_ORIGINS + (DEV_ORIGINS if os.environ.get("CV_DEV_ORIGINS") == "1" else [])
 
 # Per-route request body limits (bytes). Everything else is capped at MAX_BODY_BYTES.
 BODY_LIMITS = [
@@ -285,6 +289,7 @@ class CompileBody(Strict):
     scene_mode: SceneMode = "REGULAR_IMAGE"
     model_id: Optional[str] = Field(default=None, max_length=120)
     strength: Optional[float] = Field(default=None, ge=0, le=1)
+    recipe: Optional[dict] = None
 
 
 class BodyLimit:
@@ -332,7 +337,7 @@ def create_app(settings: Settings, secret_store: Optional[SecretStore] = None, r
     app = FastAPI(title="CozyVerse Local Worker API", version=__version__, dependencies=[Depends(auth)],
                   docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.service = svc
-    app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS,
+    app.add_middleware(CORSMiddleware, allow_origins=allowed_origins(),
                        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
                        allow_headers=["authorization", "content-type"], allow_credentials=False)
     app.add_middleware(BodyLimit)
@@ -443,7 +448,7 @@ def create_app(settings: Settings, secret_store: Optional[SecretStore] = None, r
             _p, m = svc.providers.model(body.model_id)
             caps = {"max_prompt_chars": m.caps.max_prompt_chars, "negative_prompt": m.caps.negative_prompt}
         return svc.styles.compile(body.style_id, body.prompt, body.negative_prompt, body.scene_mode, caps,
-                                  body.strength).as_dict()
+                                  body.strength, body.recipe).as_dict()
 
     @app.put("/styles/{style_id}")
     def update_style(style_id: str, body: StyleBody):
@@ -529,6 +534,12 @@ def create_app(settings: Settings, secret_store: Optional[SecretStore] = None, r
     @app.post("/projects/{project_id}/fixtures", status_code=201)
     def add_fixture(project_id: str, body: FixtureBody):
         return svc.asset_view(svc.add_asset(_id(project_id), body.fixture))
+
+    @app.get("/projects/{project_id}/file")
+    def project_file(project_id: str):
+        """Contents of a .cvbd file: a pointer to this project on this computer. Not a portable package (use Export ZIP)."""
+        p = svc.get_project(_id(project_id))
+        return {"format": "cozyverse-project", "version": 1, "project_id": p["id"], "name": p["name"], "slug": p["slug"]}
 
     @app.get("/projects/{project_id}/exports")
     def list_exports(project_id: str):
@@ -698,6 +709,14 @@ def create_app(settings: Settings, secret_store: Optional[SecretStore] = None, r
     def repair_revert(asset_id: str, view: ViewName):
         svc.get_asset(_id(asset_id))
         return svc.artifacts.revert(asset_id, view)
+
+    @app.get("/assets/{asset_id}/extras/{name}")
+    def extra_image(asset_id: str, name: Literal["top"]):
+        a = svc.get_asset(_id(asset_id))
+        p = svc.asset_dir(a) / "extras" / f"{name}.png"
+        if not p.is_file():
+            raise NotFound("extra")
+        return FileResponse(p, media_type="image/png", headers={"Cache-Control": "no-store"})
 
     # ---------------- jobs / export ----------------
     @app.get("/jobs/{job_id}")

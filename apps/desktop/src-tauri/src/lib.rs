@@ -85,6 +85,8 @@ fn worker_connection(app: tauri::AppHandle, state: State<WorkerState>) -> Result
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .stdin(Stdio::null());
+    #[cfg(debug_assertions)]
+    cmd.env("CV_DEV_ORIGINS", "1");
     no_window(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("could not start worker: {e}"))?;
     let stdout = child.stdout.take().ok_or("no worker stdout")?;
@@ -111,6 +113,26 @@ fn open_folder(path: String) -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// The .cvbd file Windows passed on the command line, if any (double-click or "Open with").
+#[tauri::command]
+fn launch_file() -> Option<String> {
+    std::env::args().skip(1).find(|a| a.to_lowercase().ends_with(".cvbd") && Path::new(a).is_file())
+}
+
+/// Read a project pointer file. Only .cvbd files up to 16 KB are accepted.
+#[tauri::command]
+fn read_project_file(path: String) -> Result<String, String> {
+    let p = Path::new(&path);
+    if p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("cvbd")) != Some(true) {
+        return Err("not a CozyVerse project file".into());
+    }
+    let meta = std::fs::metadata(p).map_err(|_| "file not found")?;
+    if !meta.is_file() || meta.len() > 16 * 1024 {
+        return Err("not a CozyVerse project file".into());
+    }
+    std::fs::read_to_string(p).map_err(|_| "could not read the file".into())
+}
+
 fn stop_worker(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<WorkerState>() {
         if let Ok(mut w) = state.0.lock() {
@@ -129,7 +151,7 @@ fn stop_worker(app: &tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .manage(WorkerState(Mutex::new(Worker::default())))
-        .invoke_handler(tauri::generate_handler![worker_connection, open_folder])
+        .invoke_handler(tauri::generate_handler![worker_connection, open_folder, launch_file, read_project_file])
         .build(tauri::generate_context!())
         .expect("error while building CozyVerse Breakdown")
         .run(|app, event| {

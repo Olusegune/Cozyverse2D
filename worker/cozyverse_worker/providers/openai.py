@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import base64
+import io
 from typing import Any, Optional
+
+from PIL import Image
 
 from .base import (Capabilities, GenerateRequest, ImageProvider, ImageResult, ModelInfo, ProviderError,
                    map_http_error, request_with_retry)
@@ -31,6 +34,21 @@ CATALOG = [
     ("gpt-image-2", "GPT Image 2", _caps(edit=False, mask=False), "unknown",
      "Appears in pricing but is not named in the image guide. Capabilities unverified."),
 ]
+
+
+def to_openai_mask(mask_png: bytes, base_png: bytes) -> bytes:
+    """CozyVerse masks are white where the edit should happen. OpenAI wants a same-size RGBA mask whose
+    transparent pixels mark the edit area, so convert (alpha 0 where white, 255 elsewhere)."""
+    with Image.open(io.BytesIO(base_png)) as base:
+        size = base.size
+    with Image.open(io.BytesIO(mask_png)) as m:
+        lum = m.convert("L").resize(size, Image.NEAREST)
+    alpha = lum.point(lambda v: 0 if v > 127 else 255)
+    out = Image.new("RGBA", size, (0, 0, 0, 255))
+    out.putalpha(alpha)
+    b = io.BytesIO()
+    out.save(b, "PNG")
+    return b.getvalue()
 
 
 class OpenAIProvider(ImageProvider):
@@ -67,7 +85,7 @@ class OpenAIProvider(ImageProvider):
                     raise ProviderError("bad_request", "edit needs a base image")
                 files = [("image[]", (f"image{i}.png", ref, "image/png")) for i, ref in enumerate(req.references)]
                 if req.mask is not None:
-                    files.append(("mask", ("mask.png", req.mask, "image/png")))
+                    files.append(("mask", ("mask.png", to_openai_mask(req.mask, req.references[0]), "image/png")))
                 data = {"model": m.slug, "prompt": req.prompt, "n": str(req.n), "size": size}
                 r = request_with_retry(c, "POST", f"{BASE}/images/edits", headers=headers, data=data, files=files,
                                        sleep=self._sleep)
