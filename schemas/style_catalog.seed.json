@@ -1,0 +1,200 @@
+{
+  "schema_version": "1.2",
+  "scene_mode": [
+    "DIORAMA",
+    "REGULAR_IMAGE"
+  ],
+  "media": [
+    "illustration_2d",
+    "paint_2d",
+    "tactile_3d",
+    "cg_3d",
+    "photography",
+    "hybrid"
+  ],
+  "starter_presets": [
+    {
+      "id": "anime_cel",
+      "label": "Anime Cel",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "manga_ink",
+      "label": "Manga Ink",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "graphic_novel",
+      "label": "Graphic Novel",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "storybook",
+      "label": "Storybook",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "paper_cutout",
+      "label": "Paper Cutout",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "pixel_art",
+      "label": "Pixel Art",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "watercolor",
+      "label": "Watercolor",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "gouache",
+      "label": "Gouache",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "oil_painting",
+      "label": "Oil Painting",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "risograph",
+      "label": "Risograph",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "linocut",
+      "label": "Linocut",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "vector_flat",
+      "label": "Vector Flat",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "line_art",
+      "label": "Line Art",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "comic_ligne_claire",
+      "label": "Comic Ligne Claire",
+      "medium": "illustration_2d"
+    },
+    {
+      "id": "claymation",
+      "label": "Claymation",
+      "medium": "tactile_3d"
+    },
+    {
+      "id": "wool_knit",
+      "label": "Wool Knit",
+      "medium": "tactile_3d"
+    },
+    {
+      "id": "felt_puppet",
+      "label": "Felt Puppet",
+      "medium": "tactile_3d"
+    },
+    {
+      "id": "papercraft",
+      "label": "Papercraft",
+      "medium": "tactile_3d"
+    },
+    {
+      "id": "cardboard_diorama",
+      "label": "Cardboard Diorama",
+      "medium": "tactile_3d"
+    },
+    {
+      "id": "wooden_toy",
+      "label": "Wooden Toy",
+      "medium": "tactile_3d"
+    },
+    {
+      "id": "vinyl_collectible",
+      "label": "Vinyl Collectible",
+      "medium": "tactile_3d"
+    },
+    {
+      "id": "resin_miniature",
+      "label": "Resin Miniature",
+      "medium": "tactile_3d"
+    },
+    {
+      "id": "stylized_cgi",
+      "label": "Stylized Cgi",
+      "medium": "cg_3d"
+    },
+    {
+      "id": "photoreal_cgi",
+      "label": "Photoreal Cgi",
+      "medium": "cg_3d"
+    },
+    {
+      "id": "low_poly",
+      "label": "Low Poly",
+      "medium": "cg_3d"
+    },
+    {
+      "id": "voxel",
+      "label": "Voxel",
+      "medium": "cg_3d"
+    },
+    {
+      "id": "cel_shaded_3d",
+      "label": "Cel Shaded 3D",
+      "medium": "cg_3d"
+    },
+    {
+      "id": "isometric_3d",
+      "label": "Isometric 3D",
+      "medium": "cg_3d"
+    },
+    {
+      "id": "hand_painted_game",
+      "label": "Hand Painted Game",
+      "medium": "cg_3d"
+    },
+    {
+      "id": "documentary",
+      "label": "Documentary",
+      "medium": "photography"
+    },
+    {
+      "id": "cinematic",
+      "label": "Cinematic",
+      "medium": "photography"
+    },
+    {
+      "id": "product",
+      "label": "Product",
+      "medium": "photography"
+    },
+    {
+      "id": "macro",
+      "label": "Macro",
+      "medium": "photography"
+    },
+    {
+      "id": "miniature_tilt_shift",
+      "label": "Miniature Tilt Shift",
+      "medium": "photography"
+    }
+  ],
+  "custom_recipe_fields": [
+    "medium",
+    "dimensionality",
+    "palette",
+    "lighting",
+    "linework",
+    "texture",
+    "camera",
+    "reference_ids",
+    "negative_constraints",
+    "strength"
+  ],
+  "all_modes_support_styles": true
+}

@@ -1,0 +1,18 @@
+{
+  "project_id": "uuid",
+  "scene_mode": "DIORAMA | REGULAR_IMAGE",
+  "source_origin": "GENERATED | IMPORTED",
+  "source_revision_id": "uuid",
+  "approved_source_revision_id": null,
+  "art_style_recipe_id": "string",
+  "art_style_recipe_revision": 1,
+  "output_goal": "2D_LAYER_EXPORT | REFERENCE_ONLY | 3D_PROXY | 3D_RECONSTRUCTION | SCENE_REASSEMBLY",
+  "provider": null,
+  "model_id": null,
+  "source_native_dimensions": {
+    "width": 0,
+    "height": 0
+  },
+  "source_lineage": [],
+  "base_mode": "NONE | FOUNDATION | LOCAL_PLINTH | SCENE_CONTEXT | MASTER_DIORAMA"
+}

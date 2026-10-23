@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CozyVerse Scene",
+  "type": "object",
+  "required": [
+    "scene_id",
+    "source",
+    "style_dna",
+    "assets",
+    "export_completeness"
+  ],
+  "properties": {
+    "scene_id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "path"
+      ]
+    },
+    "style_dna": {
+      "type": "object"
+    },
+    "units_assumption": {
+      "type": "string"
+    },
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "scene_relationships": {
+      "type": "array"
+    },
+    "export_completeness": {
+      "enum": [
+        "NOT_STARTED",
+        "PARTIAL",
+        "COMPLETE",
+        "FAILED"
+      ]
+    }
+  }
+}

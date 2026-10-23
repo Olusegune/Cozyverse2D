@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CozyVerse Master Diorama Base",
+  "type": "object",
+  "required": [
+    "base_id",
+    "mode",
+    "width_m",
+    "depth_m",
+    "thickness_m",
+    "materials",
+    "layers"
+  ],
+  "properties": {
+    "base_id": {
+      "const": "BASE-001"
+    },
+    "mode": {
+      "enum": [
+        "trace_source",
+        "procedural_rectangle",
+        "procedural_custom",
+        "import_mesh"
+      ]
+    },
+    "width_m": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "depth_m": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "thickness_m": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "bevel_m": {
+      "type": "number",
+      "minimum": 0
+    },
+    "border_width_m": {
+      "type": "number",
+      "minimum": 0
+    },
+    "materials": {
+      "type": "object"
+    },
+    "layers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "source_inferred_regions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

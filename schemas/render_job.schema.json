@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CozyVerse RenderJob v1.1",
+  "type": "object",
+  "required": [
+    "asset_id",
+    "model_revision",
+    "view",
+    "projection",
+    "base_policy",
+    "output_path"
+  ],
+  "properties": {
+    "asset_id": {
+      "type": "string"
+    },
+    "model_revision": {
+      "type": "string"
+    },
+    "view": {
+      "enum": [
+        "front",
+        "back",
+        "left",
+        "right",
+        "perspective",
+        "top",
+        "roof_off"
+      ]
+    },
+    "projection": {
+      "enum": [
+        "ORTHO",
+        "PERSP"
+      ]
+    },
+    "base_policy": {
+      "enum": [
+        "none",
+        "building_foundation",
+        "local_plinth",
+        "scene_context",
+        "full_master_base"
+      ]
+    },
+    "include_contact_shadow": {
+      "type": "boolean"
+    },
+    "background": {
+      "enum": [
+        "white",
+        "transparent"
+      ]
+    },
+    "perspective_quadrant": {
+      "enum": [
+        "front_left",
+        "front_right",
+        "rear_left",
+        "rear_right"
+      ]
+    },
+    "perspective_elevation_degrees": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 89
+    },
+    "perspective_focal_mm": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "output_path": {
+      "type": "string"
+    },
+    "qa_status": {
+      "enum": [
+        "pending",
+        "pass",
+        "needs_review",
+        "fail"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "view": {
+            "const": "perspective"
+          }
+        },
+        "required": [
+          "view"
+        ]
+      },
+      "then": {
+        "properties": {
+          "projection": {
+            "const": "PERSP"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "view": {
+            "enum": [
+              "front",
+              "back",
+              "left",
+              "right"
+            ]
+          }
+        },
+        "required": [
+          "view"
+        ]
+      },
+      "then": {
+        "properties": {
+          "projection": {
+            "const": "ORTHO"
+          }
+        }
+      }
+    }
+  ]
+}

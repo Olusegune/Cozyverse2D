@@ -1,0 +1,64 @@
+{
+  "engine": "CYCLES",
+  "resolution": 1024,
+  "assets": {
+    "BLD-003": {
+      "front": {
+        "status": "DRAFT",
+        "camera_type": "ORTHO",
+        "sha256": "dabb41f35c11ac1a71e5bd128a6bada45e58d7f21ef7d0fa0162bfac8dacab3f"
+      },
+      "back": {
+        "status": "DRAFT",
+        "camera_type": "ORTHO",
+        "sha256": "403420e04a29443eb6e7d8be65cb6bf5e6d79b26efabe4c779133a925ea74c81"
+      },
+      "left": {
+        "status": "DRAFT",
+        "camera_type": "ORTHO",
+        "sha256": "0f2cab7dea2b56f00b2c35d12734b5647633a8dc5ec90017d0186de862f9bda9"
+      },
+      "right": {
+        "status": "DRAFT",
+        "camera_type": "ORTHO",
+        "sha256": "821e3ae5b593d5186b847c740dc8af97cfe6b27b46e5f37051c9b2eb113443a4"
+      },
+      "perspective": {
+        "status": "DRAFT",
+        "camera_type": "PERSP",
+        "sha256": "27d156a6a474bea28f7137e729117046a5d6402b14e81604eaf4334644c8d2ae"
+      }
+    },
+    "BASE-001": {
+      "front": {
+        "status": "DRAFT",
+        "camera_type": "ORTHO",
+        "sha256": "9e80d014a5c743b545c3932d66afd93a407786e3e054e12e51cbf5438738e55d"
+      },
+      "back": {
+        "status": "DRAFT",
+        "camera_type": "ORTHO",
+        "sha256": "968fdad4886dd5b775bcd79d7c5d4ab658ec2b83b1210855f56125e02e104c55"
+      },
+      "left": {
+        "status": "DRAFT",
+        "camera_type": "ORTHO",
+        "sha256": "aaa2abe38ddbc45653ba910dc8463ea2674c130cb62fc9d05479ae1b0d1cf255"
+      },
+      "right": {
+        "status": "DRAFT",
+        "camera_type": "ORTHO",
+        "sha256": "b59da1347908b6b1d27ac13aee6a676152cac19081baf2abf265be179565ca24"
+      },
+      "perspective": {
+        "status": "DRAFT",
+        "camera_type": "PERSP",
+        "sha256": "c342617980dd106642ef3eb2ed5da64e438a97781cf7953d4b852b259e0e3499"
+      }
+    }
+  },
+  "export": {
+    "status": "COMPLETE",
+    "zip": "phase0_export.zip"
+  }
+}
