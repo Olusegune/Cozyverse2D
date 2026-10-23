@@ -4,7 +4,8 @@ import {
   canOpenFolder, client, getConnection, openFolder,
 } from "./api";
 import { ViewCard } from "./ViewCard";
-import splash from "./assets/splash.webp";
+import { Splash, splashDisabled } from "./Splash";
+import { Docs, QuickStart } from "./Help";
 import logo from "./assets/logo.png";
 
 const POLICIES: { value: Policy; label: string }[] = [
@@ -19,7 +20,9 @@ const ACTIVE = new Set(["NEW", "QUEUED", "RUNNING"]);
 export default function App() {
   const [api, setApi] = useState<Api | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
-  const [splashDone, setSplashDone] = useState(false);
+  const [splashOpen, setSplashOpen] = useState(() => !splashDisabled());
+  const [quick, setQuick] = useState(false);
+  const [docs, setDocs] = useState(false);
   const [blender, setBlender] = useState<BlenderInfo | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -41,8 +44,10 @@ export default function App() {
     try {
       const a = client(await getConnection());
       let h: Awaited<ReturnType<typeof a.health>> | null = null;
-      for (let i = 0; i < 12 && !h; i++) {
-        try { h = await a.health(); } catch (e) { if (i === 11) throw e; await new Promise((r) => setTimeout(r, 400)); }
+      const deadline = Date.now() + 6000;   // the host may call before uvicorn is serving; refused connections are slow on Windows
+      for (;;) {
+        try { h = await a.health(); break; }
+        catch (e) { if (Date.now() > deadline) throw e; await new Promise((r) => setTimeout(r, 300)); }
       }
       if (!h) throw new Error("worker did not respond");
       setBlender(h.blender);
@@ -55,7 +60,13 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => { void boot(); const t = setTimeout(() => setSplashDone(true), 1600); return () => clearTimeout(t); }, [boot]);
+  useEffect(() => { void boot(); }, [boot]);
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === "F1") { e.preventDefault(); setDocs(true); } };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
+  const closeSplash = useCallback(() => setSplashOpen(false), []);
 
   const refresh = useCallback(async () => {
     if (!api || !project) return;
@@ -123,20 +134,12 @@ export default function App() {
   const pending = (v: ViewName) => !!asset?.views[v].qa?.findings?.some((f) => f.code === "RENDER_PENDING");
   const anyStale = asset ? VIEWS.some((v) => asset.views[v].stale && !pending(v)) : false;
   const mixed = elevPolicy !== perspPolicy;
-  const booted = loaded && splashDone;
 
   return (
     <>
-      <div className={`splash ${booted ? "out" : ""}`} aria-hidden={booted}>
-        <img src={splash} alt="CozyVerse Breakdown. Create. Decompose. Rebuild." />
-        {!bootError && <div className="load"><i /></div>}
-        {bootError && (
-          <div className="notice bad" role="alert" style={{ position: "absolute", bottom: "6%", maxWidth: 560 }}>
-            Could not reach the local worker: {bootError}{" "}
-            <button className="btn sm" onClick={() => void boot()}>Retry</button>
-          </div>
-        )}
-      </div>
+      {splashOpen && <Splash ready={loaded} error={bootError} onRetry={() => void boot()} onClose={closeSplash} />}
+      {quick && <QuickStart onClose={() => setQuick(false)} onDocs={() => { setQuick(false); setDocs(true); }} />}
+      {docs && <Docs onClose={() => setDocs(false)} />}
 
       <div className="shell">
         <nav className="sidebar" aria-label="Main">
@@ -166,10 +169,17 @@ export default function App() {
             <i className="dot" />{blender?.found ? `Blender ${blender.version} · ${blender.device}` : "Blender not found"}
           </span>
           <span className={`chip ${busy ? "info" : ""}`}><i className="dot" />{busy ? "Working" : "Idle"}</span>
-          <span className="chip" title="Nothing leaves this computer in Phase 0">Offline · local only</span>
+          <span className="chip" title="Nothing leaves this computer unless you approve a provider call">Offline · local only</span>
+          <button className="btn sm" onClick={() => setQuick(true)}>Quick start</button>
+          <button className="btn sm" onClick={() => setDocs(true)} title="Documentation (F1)">Documentation</button>
         </header>
 
         <main className="main">
+          {bootError && !splashOpen && (
+            <div className="notice bad" role="alert" style={{ gridColumn: "1 / 3" }}>
+              Could not reach the local worker: {bootError} <button className="btn sm" onClick={() => void boot()}>Retry</button>
+            </div>
+          )}
           {!project && loaded && (
             <section className="welcome">
               <h1>Turn one world into a reusable universe of assets.</h1>
