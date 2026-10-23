@@ -2,7 +2,7 @@
 # It copies the interpreter this repo's .venv was created from, plus the .venv packages (minus test tooling).
 # Nothing is downloaded. Usage:  .\scripts\build_runtime.ps1 [-Force] [-PythonHome <dir>]
 param([switch]$Force, [string]$PythonHome)
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"   # native tools print progress on stderr; failures are caught through exit codes below
 $root = Split-Path -Parent $PSScriptRoot
 $venv = Join-Path $root ".venv"
 if (-not (Test-Path "$venv\Scripts\python.exe")) { throw "Create the .venv first (see README): $venv" }

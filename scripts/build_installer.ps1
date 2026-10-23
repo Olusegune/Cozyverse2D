@@ -3,7 +3,7 @@
 # Prerequisites: Node 20+, Rust (MSVC), the repo .venv (see README). Blender is NOT bundled (see docs/adr/0002).
 # The first build lets the Tauri CLI fetch its own NSIS toolchain into its cache.
 param([switch]$SkipTests)
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"   # native tools print progress on stderr; failures are caught through exit codes below
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 

@@ -1,4 +1,4 @@
-# CozyVerse Breakdown (Cozyverse2D)
+﻿# CozyVerse Breakdown (Cozyverse2D)
 
 A Windows desktop studio that **creates or imports an image**, breaks it into assets, and renders **five separate images per asset** from one 3D model: **front, back, left, right** (strict orthographic Blender cameras) and **perspective** (an independent 3/4 camera). Output is ready for 3D tools such as Tripo and Meshy.
 
@@ -34,7 +34,7 @@ Browser-only UI work: `.\scripts\dev.ps1` starts a dev worker and Vite at `http:
 ## Test it
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q            # about 6 minutes, renders with real Blender
+.\.venv\Scripts\python.exe -m pytest -q            # 170 tests, about 6 minutes, renders with real Blender
 .\.venv\Scripts\python.exe -m pytest -q -m "not blender"   # fast subset, no Blender needed
 ```
 
